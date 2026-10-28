@@ -179,6 +179,13 @@ export function q(value: string): string {
 export const PACKAGE_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/
 export const HOME_QUERY = 'cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME'
 export const HOME_CLAIMS = 'cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.HOME'
+// What answers HOME without being a launcher: the setup wizards and the settings apps, kept in step
+// with upstream recovery.py NOT_LAUNCHERS.
+export const NOT_LAUNCHERS = ['com.google.android.tungsten.setupwraith', 'com.android.tv.settings', 'com.android.settings', 'com.android.provision']
+// A vendor's FallbackHome activity, and a factory-test app: both answer HOME but neither is a home
+// the viewer can use (upstream FALLBACK_HOME_RE / FACTORY_HOME_RE).
+export const FALLBACK_HOME_RE = /\/[^ ]*FallbackHome$/
+export const FACTORY_HOME_RE = /factorytest|factory_test|factorymode/i
 
 /** The component that owns Home, or null (Android's chooser answers "android"). */
 export async function homeComponent(): Promise<string | null> {
@@ -203,10 +210,125 @@ export async function homeClaimants(): Promise<string[]> {
   return [...pkgs].sort()
 }
 
+/** Every HOME component as package/activity, as upstream home_claims prints them. */
+export async function homeClaims(): Promise<string[]> {
+  const out = await tv().shell(HOME_CLAIMS)
+  const claims = new Set<string>()
+  for (const line of out.split('\n')) {
+    const m = /^\s*([A-Za-z0-9_.]+\/[A-Za-z0-9_.$]+)/.exec(line)
+    if (m) claims.add(m[1])
+  }
+  return [...claims].sort()
+}
+
+/** Packages with a usable HOME activity: no FallbackHome, no factory test, no setup/settings (upstream launchers_in). */
+export function launchersIn(claims: string[]): string[] {
+  const pkgs = new Set<string>()
+  for (const c of claims) {
+    if (FALLBACK_HOME_RE.test(c)) continue
+    const pkg = c.split('/')[0]
+    if (FACTORY_HOME_RE.test(pkg)) continue
+    if (NOT_LAUNCHERS.includes(pkg)) continue
+    pkgs.add(pkg)
+  }
+  return [...pkgs].sort()
+}
+
+export interface HomeOwner {
+  /** Package that owns Home, or '' when neither query named one. */
+  pkg: string
+  /** resolve-activity answered "android": Home has no default, the chooser shows. */
+  chooser: boolean
+}
+
+/**
+ * Who owns Home, with the pre-Nougat fallback: `cmd` only exists from Android 7, so when
+ * resolve-activity names nothing package-shaped, ask the framework's mHomeProcess line, which has
+ * printed the package holding Home since 4.x (upstream #795). Diagnostic text is not an owner.
+ */
+export async function homeOwner(): Promise<HomeOwner> {
+  const ans = await homeAnswer()
+  const first = ans.split('/')[0]
+  const chooser = first === 'android'
+  if (PACKAGE_RE.test(first)) return { pkg: first, chooser }
+  let pkg = ''
+  try {
+    const dumpsys = await tv().shell('dumpsys activity')
+    for (const line of dumpsys.split('\n')) {
+      if (!line.includes('mHomeProcess:')) continue
+      const m = /[: ]([A-Za-z0-9_.]+)\/[A-Za-z0-9_.]+/.exec(line)
+      if (m && PACKAGE_RE.test(m[1])) { pkg = m[1]; break }
+    }
+  } catch {
+    pkg = ''
+  }
+  return { pkg, chooser }
+}
+
 export async function packageSets(): Promise<{ installed: Set<string>; disabled: Set<string> }> {
   const parse = (out: string): Set<string> => new Set(out.split('\n').filter((l) => l.startsWith('package:')).map((l) => l.slice(8).trim()))
-  const installed = parse(await tv().shell('pm list packages'))
+  // Every command acts on user 0, and without --user Android 14 merges every user's answer, so a
+  // package only another profile disabled would be recorded as the owner's (upstream #1569). A pm
+  // that does not take --user answers no package lines, and only that falls back to plain queries.
+  let scope = ' --user 0'
+  let installed = parse(await tv().shell('pm list packages --user 0'))
+  if (!installed.size) {
+    scope = ''
+    installed = parse(await tv().shell('pm list packages'))
+  }
   if (!installed.size) throw new Error('The TV returned no packages. Check the connection and try again.')
-  const disabled = parse(await tv().shell('pm list packages -d'))
+  const disabled = parse(await tv().shell(`pm list packages -d${scope}`))
   return { installed, disabled }
+}
+
+/** Packages among `pkgs` whose dump asks for TV_INPUT_HARDWARE, and ones the dump cannot be read for. */
+export async function tvInputCheck(pkgs: string[]): Promise<{ drivers: string[]; unchecked: string[] }> {
+  const names = [...new Set(pkgs)].join(' ')
+  // One round trip, run on the TV: the package's own "requested permissions" block (Android 6+),
+  // else its granted block, else its Service Resolver Table; "Unable to find" is not installed, and
+  // NOCHK is a dump this firmware cannot be read for (upstream #321, #1753). Every name was checked
+  // as a bare package name before this, so none of them can add shell syntax here.
+  const out = await tv().shell(
+    `for p in ${names}; do d=$(dumpsys package $p 2>/dev/null); case $d in ` +
+    `*'requested permissions:'*) printf '%s\\n' "$d" | sed -n -E '/requested permissions:/,/(install|runtime) permissions:|User [0-9]+:/p' | grep -q TV_INPUT_HARDWARE && echo $p;; ` +
+    `*'grantedPermissions:'*) printf '%s\\n' "$d" | sed -n -E '/grantedPermissions:/,/(install|runtime) permissions:|User [0-9]+:/p' | grep -q TV_INPUT_HARDWARE && echo $p;; ` +
+    `*'Service Resolver Table:'*) printf '%s\\n' "$d" | grep -q 'android.media.tv.TvInputService' && echo $p;; ` +
+    `*'Unable to find'*) :;; *) echo "NOCHK $p";; esac; done; true`)
+  const inList = new Set(pkgs)
+  const drivers: string[] = []
+  const unchecked: string[] = []
+  for (const line of out.replace(/\r/g, '').split('\n')) {
+    const t = line.trim()
+    if (t.startsWith('NOCHK ')) {
+      const p = t.slice(6).trim()
+      if (inList.has(p)) unchecked.push(p)
+    } else if (inList.has(t)) {
+      drivers.push(t)
+    }
+  }
+  return { drivers, unchecked }
+}
+
+/** Which apps answer the input-switch and Settings intents (upstream handler guard). */
+export async function handlerCheck(): Promise<{ inputApps: string[]; settingsApps: string[]; inconclusive: boolean }> {
+  const q = 'cmd package query-activities --brief'
+  // The two lists are split at the "==" line; `; true` so a firmware without a match still answers.
+  const out = await tv().shell(
+    `${q} -a android.intent.action.VIEW -t vnd.android.cursor.item/channel 2>/dev/null; echo ==; ` +
+    `${q} -a android.settings.SETTINGS 2>/dev/null; true`)
+  const lines = out.replace(/\r/g, '').split('\n')
+  const sep = lines.findIndex((l) => l.trim() === '==')
+  const names = (ls: string[]): string[] => {
+    const s = new Set<string>()
+    for (const l of ls) {
+      const m = /^\s*([A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+)\//.exec(l)
+      if (m) s.add(m[1])
+    }
+    return [...s].sort()
+  }
+  const inputApps = names(sep < 0 ? [] : lines.slice(0, sep))
+  const settingsApps = names(sep < 0 ? [] : lines.slice(sep + 1))
+  // A working query always has some app answering SETTINGS; empty means the firmware has no `cmd`
+  // or answered nothing at all, and the guard must say so instead of passing in silence (#1753).
+  return { inputApps, settingsApps, inconclusive: settingsApps.length === 0 }
 }

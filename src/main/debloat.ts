@@ -7,20 +7,44 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { paths } from './paths'
 import { log } from './log'
+import { runTx } from './tx'
+import { autoSnapshot } from './recovery'
 import * as T from './tv'
 import type { ApplyResult, DebloatApplyRequest, DebloatEntry, DebloatListSummary, DebloatPlan, PackageState, Probe } from '@shared/api'
 
 const TASK = 'debloat'
 export const SETUPWRAITH = 'com.google.android.tungsten.setupwraith'
-// They answer HOME too, but they are not launchers: setupwraith taking Home is the crash loop the
-// home guard exists to prevent.
-const NOT_LAUNCHERS = [SETUPWRAITH, 'com.android.tv.settings', 'com.android.settings', 'com.android.provision']
 export const KNOWN_STOCK_LAUNCHERS = ['com.google.android.tvlauncher', 'com.google.android.apps.tv.launcherx', 'com.google.android.leanbacklauncher', 'com.mitv.tvhome']
 const CUSTOM_LAUNCHER = 'com.gathin.tvhome'
 const SETTINGS = ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale'] as const
-const HOME_RE = /^[A-Za-z_][\w.]*\/[\w.$]+$/
+export const HOME_RE = /^[A-Za-z_][\w.]*\/[\w.$]+$/
 const SCALE_RE = /^-?\d+(\.\d+)?$/
 const VERSION = 1
+
+// Core Android packages no list may disable: with one of these off, Android itself can stop booting
+// (upstream #884: a Mi TV Stick that lost its permission controller, package installer, ext services,
+// module metadata and mainline overlays never came back; #1578: a Haier looped with its TV middleware
+// off). The content providers in CORE_OK are the exception, since tested lists turn them off and no
+// TV feature uses them. Kept in step with upstream recovery.py CORE_RE/CORE_OK.
+const CORE_RE = /^(android|android\.ext\.(services|shared)|com\.android\.systemui|com\.android\.shell|com\.android\.phone|com\.android\.settings|com\.android\.tv\.settings|com\.(google\.)?android\.(permissioncontroller|packageinstaller|ext\.services|ext\.shared|modulemetadata)|com\.google\.android\.overlay\.modules.*|com\.android\.providers\..*|com\.cltv\.mal|com\.mediatek\.(tis|tv\.service|tv\.agent))$/
+const CORE_OK = /^com\.android\.providers\.(calendar|contacts|userdictionary|blockednumber)$/
+
+/** The names that must never be disabled, in list order (upstream recovery.core_packages). */
+export function corePackages(names: string[]): string[] {
+  return names.filter((n) => CORE_RE.test(n) && !CORE_OK.test(n))
+}
+
+/** Whether a Home component is Android's chooser rather than a launcher (upstream is_chooser). */
+export function isChooser(home: string | null): boolean {
+  return !!home && !T.PACKAGE_RE.test(home.split('/')[0])
+}
+
+/** Whether a Home component answers HOME without being a launcher to put back (upstream not_a_launcher). */
+export function notALauncher(home: string | null): boolean {
+  if (!home) return false
+  const pkg = home.split('/')[0]
+  return T.NOT_LAUNCHERS.includes(pkg) || T.FALLBACK_HOME_RE.test(home) || T.FACTORY_HOME_RE.test(pkg)
+}
 
 // ---- lists ---------------------------------------------------------------------------------------
 
@@ -208,11 +232,14 @@ function pyResolve(p: string): string {
   try { return realpathSync.native(p) } catch { return resolve(p) }
 }
 
+function listDigest(listPath: string): string {
+  return createHash('sha1').update(pyResolve(listPath)).digest('hex').slice(0, 8)
+}
+
 /** Same name as recovery.py: one record per TV and list, the list identified by its absolute path. */
 export function recordPath(listPath: string, host: string): string {
   const tag = (host || 'no-host').replace(/[^A-Za-z0-9.-]/g, '_')
-  const digest = createHash('sha1').update(pyResolve(listPath)).digest('hex').slice(0, 8)
-  return join(cytvDir(), `recovery-${tag}-${digest}.json`)
+  return join(cytvDir(), `recovery-${tag}-${listDigest(listPath)}.json`)
 }
 
 export interface RecoveryRecord {
@@ -240,6 +267,20 @@ export function loadRecord(path: string): RecoveryRecord {
   if (record.version !== VERSION || typeof record.packages !== 'object' || !record.packages) {
     throw new Error(`${path}: unknown recovery record format; move it aside deliberately.`)
   }
+  // Records written before save() left the chooser out hold it as Home, and "android" among the
+  // packages with it. Everything else in them is the TV before cleanup, so the chooser and that one
+  // entry are dropped here, which reads the record the way save() writes it now. Older records can
+  // also hold a Home that is no launcher, which restore would pin Home to: only that Home is
+  // dropped, since the package's entry is its state before cleanup (upstream load_record).
+  const rawHome: unknown = record.home
+  if (typeof rawHome === 'string' && HOME_RE.test(rawHome) && isChooser(rawHome)) {
+    delete record.packages[rawHome.split('/')[0]]
+    record.home = null
+    log(TASK, 'info', `${path}: the recorded Home is Android's chooser (${rawHome}), not a launcher; reading it as no Home, so undo resolves the stock launcher.`)
+  } else if (typeof rawHome === 'string' && HOME_RE.test(rawHome) && notALauncher(rawHome)) {
+    record.home = null
+    log(TASK, 'info', `${path}: the recorded Home is ${rawHome}, which is not a launcher; reading it as no Home, so undo resolves the stock launcher.`)
+  }
   // The record is replayed on the TV's shell: a hand-edited or damaged file stops here.
   for (const [name, state] of Object.entries(record.packages)) {
     if (!T.PACKAGE_RE.test(name)) throw new Error(`${path}: not a package name: ${name}`)
@@ -254,19 +295,28 @@ export function loadRecord(path: string): RecoveryRecord {
 }
 
 /**
- * The record for this TV and list. Records are named after the TV's address, as upstream names them;
- * when the TV got a new address, its record is found by device and list and moved to the new name, so
- * undo keeps the state from before the first cleanup. A record taken from another device is refused.
+ * The record for this TV and list. `host` is the endpoint as typed (with a port); on the network a
+ * TV is its IP address, so the record is named without the port, while a record under the old name
+ * with the port is still read, as upstream find_record does. When the TV got a new address, its
+ * record is found by device and list and moved to the new name, so undo keeps the state from before
+ * the first cleanup. A record taken from another device is refused.
  */
 export function findRecord(listPath: string, host: string, device: string | undefined): { path: string; record: RecoveryRecord | null } {
-  const path = recordPath(listPath, host)
-  if (existsSync(path)) {
-    const record = loadRecord(path)
+  const path = recordPath(listPath, host.replace(/:\d+$/, ''))
+  const names = [...new Set([path, recordPath(listPath, host)])]
+  const found = names.filter((n) => existsSync(n))
+  if (found.length > 1) {
+    throw new Error(`This TV and list have two recovery records, under the name older versions gave it and the one it gets now:\n  ${found.join('\n  ')}\n` +
+      'They may be this TV before and after cleanup, or two TVs that had this address in turn. Move the one that is not this TV\'s state from before cleanup aside deliberately, then run this again. Nothing was changed on the TV.')
+  }
+  if (found.length === 1) {
+    if (found[0] !== path) log(TASK, 'info', `using ${found[0]}, the name an older version gave this TV's record.`)
+    const record = loadRecord(found[0])
     if (record.device && device && record.device !== device) {
       throw new Error(`The restore record for ${host} was taken from another device (${record.device}); this TV reports ${device}. ` +
-        `Nothing was changed. If the TV at this address really is new, move ${path} aside first.`)
+        `Nothing was changed. If the TV at this address really is new, move ${found[0]} aside first.`)
     }
-    return { path, record }
+    return { path: found[0], record }
   }
   if (device && existsSync(cytvDir())) {
     const list = pyResolve(listPath)
@@ -306,7 +356,7 @@ export function writeRecord(path: string, record: RecoveryRecord): void {
   renameSync(tmp, path)
 }
 
-function strftimeNow(): string {
+export function strftimeNow(): string {
   const d = new Date()
   const p = (n: number): string => String(n).padStart(2, '0')
   const off = -d.getTimezoneOffset()
@@ -319,6 +369,33 @@ function stateOf(name: string, installed: Set<string>, disabled: Set<string>): P
   return !installed.has(name) ? 'absent' : disabled.has(name) ? 'disabled' : 'enabled'
 }
 
+/**
+ * Records for this same list under another address that read like this TV before an earlier run: a
+ * package this run finds disabled, which that record holds as enabled before its own cleanup
+ * (upstream cleaned_by_another_record). A second TV cleaned with the same list reads the same way.
+ */
+function cleanedByAnotherRecord(listPath: string, writtenPath: string, disabled: Set<string>): Array<{ tag: string; other: string; names: string[] }> {
+  const found: Array<{ tag: string; other: string; names: string[] }> = []
+  if (!existsSync(cytvDir())) return found
+  const suffix = `-${listDigest(listPath)}.json`
+  for (const name of readdirSync(cytvDir()).sort()) {
+    if (!name.startsWith('recovery-') || !name.endsWith(suffix)) continue
+    const other = join(cytvDir(), name)
+    if (other === writtenPath) continue
+    let recorded: unknown
+    try {
+      recorded = (JSON.parse(readFileSync(other, 'utf8')) as RecoveryRecord).packages
+    } catch {
+      continue
+    }
+    if (!recorded || typeof recorded !== 'object') continue
+    const names = Object.entries(recorded as Record<string, unknown>)
+      .filter(([n, s]) => s === 'enabled' && disabled.has(n)).map(([n]) => n).sort()
+    if (names.length) found.push({ tag: name.slice('recovery-'.length, -suffix.length), other, names })
+  }
+  return found
+}
+
 /** recovery.py --save: the first record wins; later runs only add names the list gained. */
 export async function saveRecord(listPath: string, host: string, packages: string[], device?: string): Promise<RecoveryRecord> {
   const found = findRecord(listPath, host, device)
@@ -326,12 +403,24 @@ export async function saveRecord(listPath: string, host: string, packages: strin
   if (found.record) {
     const record = found.record
     const added = packages.filter((p) => !(p in record.packages))
+    // Only a name the record does not hold, or holds as absent, can change it, and only then is
+    // the TV asked (upstream save/extend_record).
+    const recheck = packages.some((p) => record.packages[p] === 'absent')
     log(TASK, 'info', `keeping the recovery record from ${record.created}: ${path}`)
-    if (added.length) {
+    if (added.length || recheck) {
       const { installed, disabled } = await T.packageSets()
       for (const name of added) record.packages[name] = stateOf(name, installed, disabled)
-      writeRecord(path, record)
-      log(TASK, 'info', `added ${added.length} names the list gained since then: ${added.join(', ')}`)
+      // A package recorded as absent that is installed and enabled now arrived after the record was
+      // taken: an update or the Play Store put it there, so its state now is its state before
+      // cleanup. One installed but disabled stays absent: nobody can say what switched it off.
+      const arrived = packages.filter((p) => record.packages[p] === 'absent' && stateOf(p, installed, disabled) === 'enabled')
+      for (const name of arrived) record.packages[name] = 'enabled'
+      if (added.length || arrived.length) {
+        writeRecord(path, record)
+        if (added.length) log(TASK, 'info', `added ${added.length} names the list gained since then: ${added.join(', ')}`)
+        if (arrived.length) log(TASK, 'info', `recorded ${arrived.length} as enabled, absent when the record was taken and installed since: ${arrived.join(', ')}`)
+        log(TASK, 'info', 'every other entry keeps the state from before the first run.')
+      }
     }
     return record
   }
@@ -339,12 +428,23 @@ export async function saveRecord(listPath: string, host: string, packages: strin
   let home = await T.homeComponent()
   const settings: Record<string, string> = {}
   for (const key of SETTINGS) settings[key] = (await T.tv().shell(`settings get global ${key}`)).trim()
-  // The launcher that owns Home may not be in the list, but it is what undo has to put back. Android's
-  // chooser answers as "android/...ResolverActivity": no launcher owns Home then, and "android" is not a
-  // name loadRecord would accept, so it is recorded as no Home at all (restore then picks the stock one).
-  if (home && !T.PACKAGE_RE.test(home.split('/')[0])) home = null
+  // Android's chooser answers as "android/...ResolverActivity": no launcher owns Home then, and
+  // "android" is not a name the record can hold, so it is recorded as no Home at all (restore then
+  // resolves the stock launcher, as it does when nothing answered HOME).
+  const chooser = home && isChooser(home) ? home : null
+  if (chooser) home = null
+  // The launcher that owns Home may not be in the list, but it is what undo has to put back.
   const homePkg = home ? home.split('/')[0] : null
   const targets = homePkg && !packages.includes(homePkg) ? [...packages, homePkg] : packages
+  // So may an installed stock launcher: undo needs its state from before, so that it turns it back
+  // on only when it was on (#1714). One the factory had disabled, or that the launcher install had
+  // disabled before this list, is recorded as disabled and stays off.
+  for (const name of KNOWN_STOCK_LAUNCHERS) if (installed.has(name) && !targets.includes(name)) targets.push(name)
+  // A Home that is no launcher (setupwraith's recovery screen, a FallbackHome, a factory test) is
+  // not recorded as Home either: restore would pin Home to it with the stock launcher enabled
+  // again. Its package keeps the entry above: that state is real.
+  const notLauncher = home && notALauncher(home) ? home : null
+  if (notLauncher) home = null
   const record: RecoveryRecord = {
     version: VERSION,
     created: strftimeNow(),
@@ -358,7 +458,18 @@ export async function saveRecord(listPath: string, host: string, packages: strin
   writeRecord(path, record)
   const already = Object.values(record.packages).filter((s) => s === 'disabled').length
   log(TASK, 'ok', `recorded ${targets.length} packages (${already} already disabled, left alone by undo) -> ${path}`)
-  log(TASK, 'info', `Home before: ${home ?? 'no component answered'}`)
+  if (chooser) log(TASK, 'info', `HOME before: ${chooser}, Android's chooser (Home has no default), so no Home was recorded`)
+  else if (notLauncher) log(TASK, 'info', `HOME before: ${notLauncher}, which is not a launcher (a setup wizard, a settings app, a FallbackHome or a factory test), so no Home was recorded`)
+  else log(TASK, 'info', `Home before: ${home ?? 'no component answered'}`)
+  // A fresh record is also what a TV on a new DHCP lease looks like: the record from before its
+  // cleanup is still under the old address, and nothing in it reaches undo from here (#2139).
+  for (const { tag, other, names } of cleanedByAnotherRecord(listPath, path, disabled)) {
+    const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? ', ...' : '')
+    log(TASK, 'warn', `a new restore point was written for this list, and one for the same list is under ${tag}: ${other}. ` +
+      `${names.length} of the packages switched off now are recorded there as enabled before an earlier cleanup (${shown}). ` +
+      'If this is that TV on a new address, restoring from here leaves those off: restore from the older point first. ' +
+      'If this is a second TV cleaned with the same list, nothing is wrong: both points stay.')
+  }
   return record
 }
 
@@ -368,7 +479,7 @@ export function restoreCommands(listPackages: string[], record: RecoveryRecord |
   const cmds: string[] = []
   const resolveStock = `cmd package set-home-activity --user 0 $(${T.HOME_QUERY} ${stock} | tail -n 1)`
   if (!record) {
-    notes.push('No recovery record for this TV and list: enabling every listed package and resetting Home and the animation scales to their defaults.')
+    notes.push('[STRING_PLACEHOLDER_1]')
     for (const n of listPackages) cmds.push(`pm enable ${n}`)
     cmds.push(`pm enable ${stock}`)
     cmds.push(resolveStock)
@@ -381,15 +492,29 @@ export function restoreCommands(listPackages: string[], record: RecoveryRecord |
   for (const n of reEnable) cmds.push(`pm enable ${n}`)
   const untouched = Object.keys(states).filter((n) => states[n] !== 'enabled')
   if (untouched.length) notes.push(`Left as they were before cleanup: ${untouched.join(', ')}`)
-  // The stock launcher comes back unless the owner had disabled it before cleanup.
-  if (states[stock] !== 'disabled' && !reEnable.includes(stock)) cmds.push(`pm enable ${stock}`)
+  // The stock launcher comes back only when the record holds it as enabled, which reEnable above
+  // already covers (#1714): restore enables what was on before cleanup and nothing else. One the
+  // record holds as disabled was off before this list (the factory, or the launcher install before
+  // the list), and one it does not hold at all cannot be said to have been on, so neither is
+  // turned on here.
+  const fallbackState = states[stock]
   const home = record.home
   if (home && home.split('/')[0] !== CUSTOM_LAUNCHER) cmds.push(`cmd package set-home-activity --user 0 ${home}`)
-  else cmds.push(resolveStock)
+  else if (home && fallbackState !== 'enabled') {
+    // This project's launcher owned Home and the stock launcher was not on: Home stays where it
+    // was. Its package is in the record as enabled, so it was enabled above.
+    cmds.push(`cmd package set-home-activity --user 0 ${home}`)
+    notes.push(`Home goes back to ${home}, which owned it when the record was taken: ${stock} was ${fallbackState ?? 'not in the record'} then, so it stays as it is. ` +
+      `To have it back, untick ${stock} in the list to switch it on, then use the Launcher step's "Give Home back" button.`)
+  } else if (!home && (fallbackState === 'disabled' || fallbackState === 'absent')) {
+    // No Home was recorded and the stock launcher was off or missing: there is nothing to resolve.
+    notes.push(`Leaving Home alone: none was recorded, and ${stock} was ${fallbackState} when the record was taken.`)
+  } else cmds.push(resolveStock)
   for (const k of SETTINGS) {
     const v = String(record.settings?.[k] ?? '').trim()
     if (v === 'null') cmds.push(`settings delete global ${k}`)
     else if (SCALE_RE.test(v)) cmds.push(`settings put global ${k} ${v}`)
+    else notes.push(`Skipping ${k}: the record holds ${JSON.stringify(v) || 'nothing'}, not a number`)
   }
   const edited = listPackages.filter((n) => !(n in states))
   if (edited.length) notes.push(`Not in the record, left alone: ${edited.join(', ')}`)
@@ -443,7 +568,7 @@ export async function plan(listId: string): Promise<DebloatPlan> {
   const { title, parsed } = sourceList(listId)
   const { installed, disabled } = await T.packageSets()
   const file = savedListPath(listId, probe)
-  const { path: rpath, record } = findRecord(file, probe.host, probe.device || undefined)
+  const { path: rpath, record } = findRecord(file, T.getStatus().host ?? probe.host, probe.device || undefined)
   const common = commonality()
   let entries: DebloatEntry[] = parsed.entries.map((e) => ({
     pkg: e.pkg,
@@ -495,10 +620,20 @@ export async function apply(req: DebloatApplyRequest): Promise<ApplyResult> {
   const probe = T.getStatus().probe
   if (!probe) throw new Error('Connect to a TV first.')
   for (const p of [...req.disable, ...req.enable]) if (!T.PACKAGE_RE.test(p)) throw new Error(`not a package name: ${p}`)
+  // Core Android packages: refused before the TV is touched, with no override (upstream #884).
+  const core = corePackages(req.disable)
+  if (core.length) {
+    throw new Error(`Refusing the list: it switches off core Android packages, and without them the TV may not boot again:\n  ${core.join('\n  ')}\nUntick these and apply again. Nothing was changed on the TV.`)
+  }
   const { title, parsed } = sourceList(req.listId)
-  const host = T.host()
+  const host = T.getStatus().host ?? probe.host
   const warnings: string[] = []
   let pkgs = [...new Set(req.disable)]
+  // Say when a safety override is on (upstream #1845).
+  if (req.forceHome) log(TASK, 'info', 'note: the Home guard override is on; the current Home app will be switched off too.')
+  if (req.forceSetupwraith) log(TASK, 'info', 'note: the setup-wizard override is on; setupwraith will be switched off even if it owns the Wi-Fi network.')
+  if (req.forceTvInput) log(TASK, 'info', 'note: the input-driver override is on; HDMI/AV input drivers will be switched off too.')
+  if (req.forceHandlers) log(TASK, 'info', 'note: the handlers override is on; the apps that open inputs and Settings will be switched off too.')
 
   // A Wi-Fi network saved during the first-run wizard belongs to setupwraith, and Android deletes it the
   // moment setupwraith is disabled: the TV drops off Wi-Fi, and ADB with it.
@@ -515,15 +650,108 @@ export async function apply(req: DebloatApplyRequest): Promise<ApplyResult> {
     }
   }
 
-  // Home guard: never leave the TV with nothing that can answer Home.
-  const homeAns = await T.homeAnswer()
-  const homePkg = homeAns.split('/')[0]
-  if (homePkg && pkgs.includes(homePkg) && !req.forceHome) {
-    const claims = await T.homeClaimants()
-    const others = claims.filter((c) => c !== homePkg && !pkgs.includes(c) && !NOT_LAUNCHERS.includes(c))
-    if (!others.length) {
-      warnings.push(`Skipped ${homePkg}: it owns Home and nothing else that can answer Home stays enabled. Install the new launcher first (Launcher step), then apply again.`)
-      pkgs = pkgs.filter((p) => p !== homePkg)
+  // Home guard: never leave the TV with nothing that can answer Home (upstream #239, #565, #795).
+  if (!req.forceHome && pkgs.length) {
+    const { pkg: homePkg, chooser } = await T.homeOwner()
+    if (homePkg) {
+      // The extra query is worth it only when the list holds Home's own package, which is how a
+      // list that leaves the TV without a launcher looks before anything is disabled.
+      if (pkgs.includes(homePkg)) {
+        const claims = await T.homeClaims()
+        const launchers = T.launchersIn(claims)
+        const others = launchers.filter((c) => c !== homePkg && !pkgs.includes(c))
+        // Another launcher is not enough while setupwraith answers HOME and stays enabled (not
+        // listed, or skipped above for the Wi-Fi network): on Google TV its RecoveryActivity
+        // answers ahead of an installed launcher, so with the owner switched off Home goes to it,
+        // not to the launcher that is merely installed (#1573).
+        const setupHome = claims.some((c) => c.startsWith(SETUPWRAITH + '/')) && !pkgs.includes(SETUPWRAITH)
+        if (!others.length) {
+          warnings.push(`Skipped ${homePkg}: it owns Home and nothing else that can answer Home stays enabled. Install the new launcher first (Launcher step), then apply again.`)
+          pkgs = pkgs.filter((p) => p !== homePkg)
+        } else if (setupHome) {
+          warnings.push(`Skipped ${homePkg}: it owns Home, and ${SETUPWRAITH} stays enabled and answers Home ahead of the other launchers here, so with ${homePkg} switched off Home would go to its RecoveryActivity, the black screen the TV can crash-loop on. Install the new launcher first (Launcher step), or switch off setupwraith in the same run, then apply again.`)
+          pkgs = pkgs.filter((p) => p !== homePkg)
+        }
+      }
+    } else {
+      // No single owner: Android's chooser, or neither query named one. Skipping the guard here
+      // would let a list take every launcher, so fail closed: judge by the HOME claimants, and if
+      // the TV cannot list those either, keep every known stock launcher.
+      let launchers: string[] | null = null
+      try {
+        launchers = T.launchersIn(await T.homeClaims())
+      } catch {
+        launchers = null
+      }
+      if (launchers) {
+        const listed = launchers.filter((l) => pkgs.includes(l))
+        const others = launchers.filter((l) => !pkgs.includes(l))
+        if (listed.length && !others.length) {
+          for (const p of listed) {
+            warnings.push(`Skipped ${p}: Home has no default, and once the list is applied no other app could answer Home. Install the new launcher first (Launcher step), then apply again.`)
+            pkgs = pkgs.filter((x) => x !== p)
+          }
+        }
+      } else {
+        for (const p of KNOWN_STOCK_LAUNCHERS) {
+          if (!pkgs.includes(p)) continue
+          warnings.push(`Skipped ${p}: could not ask the TV which apps answer Home, and it is a stock launcher. Apply again once the TV answers.`)
+          pkgs = pkgs.filter((x) => x !== p)
+        }
+      }
+    }
+    // Neither query named Home, so the guard above could only go by the apps that answer Home. Say
+    // so: a silent fallback looks exactly like a check that passed (#795).
+    if (pkgs.length && !homePkg) {
+      const checked = 'Check that the list does not hold your launcher before applying it. The replacement launcher needs Android 8.0, so on an older set the stock launcher is the only Home there is: switched off, it leaves nothing to start.'
+      warnings.push(chooser
+        ? `Home has no default on this TV (the chooser shows), so the Home guard went by the apps that answer Home instead. ${checked}`
+        : `Could not tell which app owns Home on this TV, so the Home guard went by the apps that answer Home instead. ${checked}`)
+    }
+  }
+
+  // A package that asks for TV_INPUT_HARDWARE is usually the software layer under the HDMI, AV and
+  // tuner inputs: routing, the HDCP handshake and scaling live in it (upstream #321).
+  if (!req.forceTvInput && pkgs.length) {
+    try {
+      const { drivers, unchecked } = await T.tvInputCheck(pkgs)
+      // A dump with neither block is one the guard cannot read: the package is kept off the batch
+      // instead of passing silently (a black input is easy to blame on the cable).
+      for (const p of unchecked) {
+        warnings.push(`Skipped ${p}: the TV's answer cannot be read for the input-driver check, so it stays enabled. Once every input still works after a reboot, use the Safety overrides below to switch it off.`)
+        pkgs = pkgs.filter((x) => x !== p)
+      }
+      for (const p of drivers) {
+        warnings.push(`Skipped ${p}: it asks for android.permission.TV_INPUT_HARDWARE, so it is the software layer under the HDMI/AV/tuner inputs. With it switched off those inputs still notice the cable but stay black ("No Signal"), and only a full restore plus a cold boot brings the picture back (#321). Asking for the permission is not proof, though: check every input after a reboot before trusting it, then use the Safety overrides below to switch it off.`)
+        pkgs = pkgs.filter((x) => x !== p)
+      }
+    } catch (e) {
+      // Do not skip anything on a guess, but say the check did not run.
+      warnings.push(`Could not check which listed packages drive the HDMI/AV inputs (${(e as Error).message}). Check every input after this run: a port that notices the cable and stays black means one of them was switched off, and only a full restore and a cold boot bring it back (#321).`)
+    }
+  }
+
+  // The launcher switches to an HDMI input with ACTION_VIEW on a passthrough channel URI, and its
+  // Settings entry opens android.settings.SETTINGS. Whichever app answers those on this TV has to
+  // stay: disabled, the input tiles do nothing and Settings does not open (upstream handler guard).
+  if (!req.forceHandlers && pkgs.length) {
+    try {
+      const { inputApps, settingsApps, inconclusive } = await T.handlerCheck()
+      if (inconclusive) {
+        warnings.push('Could not check which listed packages open the TV\'s inputs and Settings: the query answered with nothing at all. After this run, open an HDMI input and Settings from the launcher before you put the remote down.')
+      }
+      for (const p of inputApps) {
+        if (!pkgs.includes(p)) continue
+        warnings.push(`Skipped ${p}: the TV opens its HDMI/AV inputs and channels with it, so with it switched off the launcher's input tiles do nothing. Use the Safety overrides below to switch it off anyway.`)
+        pkgs = pkgs.filter((x) => x !== p)
+      }
+      for (const p of settingsApps) {
+        if (!pkgs.includes(p)) continue
+        warnings.push(`Skipped ${p}: the TV opens Settings with it, so with it switched off Settings does not open (and with it the way back to Developer options). Use the Safety overrides below to switch it off anyway.`)
+        pkgs = pkgs.filter((x) => x !== p)
+      }
+    } catch (e) {
+      warnings.push(`Could not check which listed packages open the TV's inputs and Settings (${(e as Error).message}). After this run, open an HDMI input and Settings from the launcher before you put the remote down.`)
     }
   }
 
@@ -535,24 +763,59 @@ export async function apply(req: DebloatApplyRequest): Promise<ApplyResult> {
   const active = [...new Set([...savedActive(file), ...req.disable])].filter((p) => !req.enable.includes(p))
   writeSavedList(file, title, parsed.header, active, parsed.entries)
   log(TASK, 'info', `list saved to ${file}`)
-  await saveRecord(file, host, active, probe.device || undefined)
+  // Automatic recovery point before anything changes (best-effort: the record below is the
+  // net that always holds). Deferred use only: recovery.ts also imports this module.
+  try {
+    await autoSnapshot('debloat')
+  } catch (e) {
+    warnings.push(`Automatic recovery point failed (${(e as Error).message}); the recovery record below is still written.`)
+  }
 
+  const record = await saveRecord(file, host, active, probe.device || undefined)
+
+  // The batch is one transaction: a dead connection halfway through replays the record that was
+  // just written instead of leaving half a list applied. A package the TV answers oddly about is
+  // still a soft warning, not a rollback: only a hard failure reverts.
   let done = 0
-  for (const p of pkgs) {
-    const out = await T.sh(TASK, `pm disable-user --user 0 ${p}`)
-    if (/disabled/.test(out)) done++
-    else warnings.push(`${p}: ${out.trim() || 'no answer'}`)
-  }
   let enabled = 0
-  for (const p of req.enable) {
-    const out = await T.sh(TASK, `pm enable ${p}`)
-    if (/enabled/.test(out)) enabled++
-    else warnings.push(`${p}: ${out.trim() || 'no answer'}`)
-  }
+  const planned = [...pkgs.map((p) => `disable ${p}`), ...req.enable.map((p) => `enable ${p}`)]
+  const tx = await runTx(TASK, `Apply ${title}`, [{
+    label: `switch ${pkgs.length} off, ${req.enable.length} on`,
+    plan: planned.length > 10 ? [...planned.slice(0, 10), `…and ${planned.length - 10} more`] : planned,
+    snapshot: async () => record,
+    apply: async () => {
+      for (const p of pkgs) {
+        const out = await T.sh(TASK, `pm disable-user --user 0 ${p}`)
+        if (/disabled/.test(out)) done++
+        else warnings.push(`${p}: ${out.trim() || 'no answer'}`)
+      }
+      for (const p of req.enable) {
+        const out = await T.sh(TASK, `pm enable ${p}`)
+        if (/enabled/.test(out)) enabled++
+        else warnings.push(`${p}: ${out.trim() || 'no answer'}`)
+      }
+    },
+    verify: async () => {
+      await T.sh(TASK, 'echo alive')
+    },
+    rollback: async (snap) => {
+      const notes: string[] = []
+      const cmds = restoreCommands(active, snap, await stockFallback(), notes)
+      for (const n of notes) log(TASK, 'info', `rollback: ${n}`)
+      await T.batch(TASK, cmds)
+    }
+  }])
+  if (!tx.ok) throw new Error(`Apply failed partway (${tx.error}); the TV was rolled back to the recovery record${tx.rollbackError ? `, but: ${tx.rollbackError}` : ''}.`)
   if (adbSecure === '0') {
     warnings.push('This TV reports ro.adb.secure=0: network debugging accepts any device on your network without the Allow prompt. Switch debugging off when you are done (Finish step).')
+  } else if (adbSecure === '') {
+    // An empty value counts too: on a debug build, and on Android 4.4, adbd reads a missing
+    // ro.adb.secure as 0 (upstream #1720).
+    warnings.push('This TV does not set ro.adb.secure. On a debug (userdebug) build or Android 4.4 that is the same as ro.adb.secure=0: network debugging accepts any device on your network without the Allow prompt. Switch debugging off when you are done (Finish step).')
   }
-  const summary = `Disabled ${done} of ${pkgs.length} package${pkgs.length === 1 ? '' : 's'}` + (req.enable.length ? `, switched ${enabled} back on.` : '.')
+  const summary = !pkgs.length && !req.enable.length
+    ? 'Nothing was switched off.'
+    : `Disabled ${done} of ${pkgs.length} package${pkgs.length === 1 ? '' : 's'}` + (req.enable.length ? `, switched ${enabled} back on.` : '.')
   log(TASK, 'ok', summary)
   return { ok: done === pkgs.length && enabled === req.enable.length, summary, warnings }
 }
@@ -566,7 +829,7 @@ export async function restore(listId: string): Promise<ApplyResult> {
   const probe = T.getStatus().probe
   if (!probe) throw new Error('Connect to a TV first.')
   const file = savedListPath(listId, probe)
-  const { record } = findRecord(file, probe.host, probe.device || undefined)
+  const { record } = findRecord(file, T.getStatus().host ?? probe.host, probe.device || undefined)
   const listPkgs = existsSync(file) ? savedActive(file) : sourceList(listId).parsed.entries.filter((e) => e.suggested).map((e) => e.pkg)
   const notes: string[] = []
   const cmds = restoreCommands(listPkgs, record, await stockFallback(), notes)

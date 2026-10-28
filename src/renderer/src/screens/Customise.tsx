@@ -5,7 +5,7 @@ import { AppOrder } from '../components/AppOrder'
 import { TvPreview } from '../components/TvPreview'
 import { Busy, Confirm, Modal, ResultNotice, Slider, Toggle, errorText } from '../components/ui'
 import { BUILTIN, orderedApps, val } from '../lib/apps'
-import { dataUrlToImage, prepareWallpaper, uniqueNames, type PreparedImage } from '../lib/image'
+import { dataUrlToImage, imageFileToPrepared, prepareWallpaper, uniqueNames, type PreparedImage } from '../lib/image'
 import { fetchBingDaily, tmdbBackdropPaths, fetchTmdbBackdrop } from '../lib/backgrounds'
 
 type Tab = 'apps' | 'layout' | 'backdrop' | 'greeting' | 'motion' | 'advanced'
@@ -449,6 +449,7 @@ function BackdropTab(props: {
     const { dock_apps: _d, hidden_apps: _h, ...look } = p.config
     props.setCfg((c) => ({ ...c, ...look }))
     if (p.wallpaper) props.setWall({ kind: 'set', image: dataUrlToImage(p.wallpaper, 'wallpaper.jpg') })
+    if (p.wallpapers.length) props.setRotation({ kind: 'set', images: uniqueNames(p.wallpapers.map(imageFileToPrepared)).slice(0, 100) })
   }
 
   const rotationNames = props.rotation.kind === 'set' ? props.rotation.images.map((i) => i.name) : props.loadedRotation

@@ -4,26 +4,32 @@ import { LogDrawer } from './components/LogDrawer'
 import { NotConnected } from './components/ui'
 import Guided from './screens/Guided'
 import { Setup } from './screens/Setup'
+import { Devices } from './screens/Devices'
+import { Analyze } from './screens/Analyze'
 import { Debloat } from './screens/Debloat'
 import { Launcher } from './screens/Launcher'
 import { Customise } from './screens/Customise'
 import { Extras } from './screens/Extras'
+import { Recovery } from './screens/Recovery'
 import { Finish } from './screens/Finish'
 import { version } from '../../../package.json'
 
 const REPO_URL = 'https://github.com/wingedpanther/cleanmytv'
 
-export type StepId = 'guided' | 'setup' | 'debloat' | 'launcher' | 'customise' | 'extras' | 'finish'
+export type StepId = 'guided' | 'setup' | 'devices' | 'analyze' | 'debloat' | 'launcher' | 'customise' | 'extras' | 'recovery' | 'finish'
 
 const STEPS: { id: StepId; label: string; sub: string; needsTv: boolean }[] = [
   // The guided one-button run (#9): composes the same IPC the step screens
   // use, so first-time owners get one path while every step stays reachable.
   { id: 'guided', label: 'Clean & launch', sub: 'One button, every step', needsTv: true },
   { id: 'setup', label: 'Setup', sub: 'Check and connect', needsTv: false },
+  { id: 'devices', label: 'Devices', sub: 'TVs & capabilities', needsTv: false },
+  { id: 'analyze', label: 'Analyze', sub: 'Health & Fix My TV', needsTv: true },
   { id: 'debloat', label: 'Clean up', sub: 'Turn off the bloat', needsTv: true },
   { id: 'launcher', label: 'Launcher', sub: 'Install the new Home', needsTv: true },
   { id: 'customise', label: 'Customise', sub: 'Order, wallpaper, layout', needsTv: true },
   { id: 'extras', label: 'TV extras', sub: 'Screensaver, DNS, remote', needsTv: true },
+  { id: 'recovery', label: 'Recovery', sub: 'Snapshots & undo', needsTv: true },
   { id: 'finish', label: 'Finish', sub: 'Close the debug port', needsTv: false }
 ]
 
@@ -36,7 +42,8 @@ export interface ScreenProps {
 export default function App(): ReactNode {
   const [step, setStep] = useState<StepId>(() => {
     const h = location.hash.slice(1)
-    return STEPS.some((s) => s.id === h) ? (h as StepId) : 'setup'
+    // The dashboard is the default experience ("Your TV can be improved").
+    return STEPS.some((s) => s.id === h) ? (h as StepId) : 'analyze'
   })
   const [status, setStatus] = useState<ConnStatus>({ state: 'idle' })
   const [done, setDone] = useState<Set<StepId>>(new Set())
@@ -68,10 +75,13 @@ export default function App(): ReactNode {
   if (current.needsTv && !connected) screen = <NotConnected onGo={() => setStep('setup')} />
   else if (step === 'guided') screen = <Guided {...props} />
   else if (step === 'setup') screen = <Setup {...props} />
+  else if (step === 'devices') screen = <Devices {...props} />
+  else if (step === 'analyze') screen = <Analyze {...props} />
   else if (step === 'debloat') screen = <Debloat {...props} />
   else if (step === 'launcher') screen = <Launcher {...props} />
   else if (step === 'customise') screen = <Customise {...props} />
   else if (step === 'extras') screen = <Extras {...props} />
+  else if (step === 'recovery') screen = <Recovery {...props} />
   else screen = <Finish {...props} />
 
   return (

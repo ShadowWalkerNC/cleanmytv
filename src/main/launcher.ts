@@ -4,18 +4,22 @@ import { existsSync, readFileSync } from 'node:fs'
 import { paths } from './paths'
 import { log } from './log'
 import * as T from './tv'
-import { KNOWN_STOCK_LAUNCHERS } from './debloat'
+import { runTx } from './tx'
+import { autoSnapshot } from './recovery'
+import { HOME_RE, KNOWN_STOCK_LAUNCHERS } from './debloat'
+import { PKG } from './launcherPkg'
 import type { ApplyResult, InstallRequest, InstallResult, LauncherStatus } from '@shared/api'
 
+export { PKG }
+
 const TASK = 'install'
-export const PKG = 'com.gathin.tvhome'
 const MAIN = `${PKG}/.MainActivity`
 
-function bundledVersion(): string | undefined {
+function apkInfo(infoPath: string): { versionName?: string; minSdk?: number } {
   try {
-    return JSON.parse(readFileSync(paths.bundledApkInfo, 'utf8')).versionName
+    return JSON.parse(readFileSync(infoPath, 'utf8'))
   } catch {
-    return undefined
+    return {}
   }
 }
 
@@ -31,7 +35,7 @@ export async function status(): Promise<LauncherStatus> {
     homeComponent: home,
     stockLauncher: KNOWN_STOCK_LAUNCHERS.find((p) => installed.has(p)) ?? null,
     bundledApk: existsSync(paths.bundledApk),
-    bundledVersion: bundledVersion(),
+    bundledVersion: apkInfo(paths.bundledApkInfo).versionName,
     localApk: existsSync(paths.localApk)
   }
 }
@@ -84,10 +88,29 @@ export async function install(req: InstallRequest): Promise<InstallResult> {
     return { ok: false, summary: req.apk === 'local' ? 'No local build yet. Build from source first.' : 'The bundled launcher is missing from this copy of the app.', warnings: [] }
   }
   const warnings: string[] = []
+  // Below minSdk, `pm install` refuses the APK with INSTALL_FAILED_OLDER_SDK. Refuse it before the
+  // TV is asked anything, from the number recorded when the APK was built (upstream #576).
+  const minSdk = apkInfo(apkPath.replace(/\.apk$/, '.json')).minSdk
+  const tvSdk = T.getStatus().probe?.sdk ?? 0
+  if (minSdk && tvSdk > 0 && tvSdk < minSdk) {
+    return {
+      ok: false,
+      summary: `This TV runs SDK ${tvSdk} and the launcher needs SDK ${minSdk}, so Android would refuse it. Nothing was installed or switched off.`,
+      warnings: ['The cleanup half of the app still applies to that set, from its own home screen.']
+    }
+  }
   let stock = req.stockLauncher
   if (stock === 'auto') stock = await detectStock()
   else if (stock !== 'none' && !T.PACKAGE_RE.test(stock)) throw new Error(`not a package name: ${stock}`)
   log(TASK, 'info', `stock launcher: ${stock}`)
+
+  // Automatic recovery point before anything changes (best-effort: the handover transaction
+  // below rolls back on its own). Deferred use only: recovery.ts also imports this module.
+  try {
+    await autoSnapshot('launcher')
+  } catch (e) {
+    warnings.push(`Automatic recovery point failed (${(e as Error).message}); install continues with transaction rollback only.`)
+  }
 
   const tmp = '/data/local/tmp/tvhome.apk'
   await T.pushB64(TASK, readFileSync(apkPath), tmp)
@@ -114,33 +137,80 @@ export async function install(req: InstallRequest): Promise<InstallResult> {
     out = await T.sh(TASK, `pm install -r ${tmp}`, { timeoutMs: 300000 })
   }
   await T.sh(TASK, `rm -f ${tmp}`)
+  if (out.includes('INSTALL_FAILED_OLDER_SDK')) {
+    // The pre-flight above missed it (a TV whose probe did not answer, or an APK built elsewhere):
+    // name the real cause instead of leaving the raw Failure line to be read as an ADB problem.
+    return {
+      ok: false,
+      summary: `Android refused the APK as too new for this set (INSTALL_FAILED_OLDER_SDK): the TV runs an older SDK than the launcher's minimum${minSdk ? ` of ${minSdk}` : ''}. The stock launcher was left untouched.`,
+      warnings: []
+    }
+  }
   if (!out.includes('Success')) {
     return { ok: false, summary: 'Install failed; the stock launcher was left alone.', warnings: [out.trim()] }
   }
 
+  // Replacing the launcher while it is Home lets Android restart it mid-update, and on a TCL G03
+  // that instance came up broken: Home then left the previous app on screen (#1101). `am start`
+  // below would only reuse it, so stop it first; the start then creates a fresh one. A force stop
+  // also takes the key helpers off the enabled list, so a helper that was on is written back
+  // (cleared first: Android binds again only when the list changes).
+  await T.sh(TASK, `s=$(settings get secure enabled_accessibility_services); a=$(settings get secure accessibility_enabled); am force-stop ${PKG}; case "$s" in *${PKG}*) settings put secure enabled_accessibility_services ""; settings put secure enabled_accessibility_services "$s"; settings put secure accessibility_enabled "$a" ;; esac`)
+
   // Start the launcher before the stock Home is touched: "Status: ok" proves the activity came up.
-  const start = await T.sh(TASK, `am start -W -n ${MAIN}`)
+  // With the stock launcher left alone the component alone still proves it: a MAIN+HOME start would
+  // make this launcher the home process until a restart, and Android then blocks the stock
+  // launcher's remote-button launches (upstream #1274).
+  const startCmd = stock === 'none'
+    ? `am start -W -n ${MAIN}`
+    : `am start -W -a android.intent.action.MAIN -c android.intent.category.HOME -n ${MAIN}`
+  const start = await T.sh(TASK, startCmd)
   if (!start.includes('Status: ok') || /^Error/im.test(start)) {
     return { ok: false, summary: `The new launcher did not start; ${stock === 'none' ? 'nothing was disabled' : stock + ' was left enabled'}.`, warnings: [start.trim()] }
   }
-  await T.batch(TASK, [
-    `pm grant ${PKG} android.permission.ACCESS_FINE_LOCATION 2>/dev/null; echo location-granted`,
-    `cmd package compile -m speed -f ${PKG}`,
-    stock === 'none' ? 'echo stock launcher left alone' : `pm disable-user --user 0 ${stock}`,
-    `cmd package set-home-activity --user 0 ${MAIN}`
-  ])
-
   // Android drops the home preference whenever the set of HOME apps changes, and on Google TV the next
-  // candidate can be the setup wizard, which crash-loops. Check where Home landed; roll back if not ours.
+  // candidate can be the setup wizard, which crash-loops. The handover is one transaction: disable
+  // the stock launcher and move Home, verify Home landed on the new launcher, else put the stock
+  // launcher back and remove the new one when this run installed it.
   let now: string | null = null
-  try { now = await T.homeComponent() } catch { now = null }
-  if (!now?.startsWith(PKG + '/')) {
-    const back = await rollback(stock)
+  const tx = await runTx(TASK, 'Hand over Home', [{
+    label: stock === 'none' ? 'move Home to the new launcher' : `disable ${stock} and move Home`,
+    plan: stock === 'none'
+      ? ['stock launcher left alone', `Home -> ${MAIN}`]
+      : [`pm disable-user --user 0 ${stock}`, `Home -> ${MAIN}`],
+    snapshot: async () => ({ home: await T.homeComponent().catch(() => null), installed: (await T.packageSets()).installed.has(PKG) }),
+    apply: async () => {
+      await T.batch(TASK, [
+        `pm grant ${PKG} android.permission.ACCESS_FINE_LOCATION 2>/dev/null; echo location-granted`,
+        `cmd package compile -m speed -f ${PKG}`,
+        stock === 'none' ? 'echo stock launcher left alone' : `pm disable-user --user 0 ${stock}`,
+        `cmd package set-home-activity --user 0 ${MAIN}`
+      ])
+    },
+    verify: async () => {
+      try { now = await T.homeComponent() } catch { now = null }
+      if (!now?.startsWith(PKG + '/')) throw new Error(now ? `Home resolves to ${now}` : 'the TV stopped answering')
+    },
+    rollback: async (snap) => {
+      // Nothing was disabled with stock 'none': Home goes back to what it was, and the new
+      // launcher comes off again when this run installed it.
+      if (stock === 'none') {
+        if (snap.home && HOME_RE.test(snap.home)) await T.sh(TASK, `cmd package set-home-activity --user 0 ${snap.home}`)
+        if (!snap.installed) await T.sh(TASK, `pm uninstall ${PKG}`)
+        return
+      }
+      const back = await rollback(stock)
+      if (!back) throw new Error(`could not give Home back automatically (run: pm enable --user 0 ${stock})`)
+      if (!snap.installed) await T.sh(TASK, `pm uninstall ${PKG}`)
+    }
+  }])
+  if (!tx.ok) {
     return {
       ok: false,
-      summary: now ? `Home resolves to ${now}, not to the new launcher.` : 'The TV stopped answering while Home was switched.',
+      summary: `Installed, but ${tx.error}.`,
       warnings: [
-        back ? `${stock} was put back as Home.` : `Could not give Home back automatically. Run: pm enable --user 0 ${stock}`,
+        ...(tx.rolledBack.length ? [`${stock} was put back as Home.`] : []),
+        ...(tx.rollbackError ? [tx.rollbackError] : []),
         'On Google TV this usually means com.google.android.tungsten.setupwraith also claims Home: add it to your cleanup list, apply it, then install again.'
       ]
     }
@@ -151,13 +221,22 @@ export async function install(req: InstallRequest): Promise<InstallResult> {
   for (const [on, svc] of [[req.inputKeyService, 'InputKeyService'], [req.homeKeyService, 'HomeKeyService']] as const) {
     if (on) await enableService(svc)
   }
+  if (req.restoreKeyServices) {
+    await T.sh(TASK, `pm grant ${PKG} android.permission.WRITE_SECURE_SETTINGS && echo restore-granted`)
+  }
   return { ok: true, summary: 'Installed. Press Home on the remote to see it.', warnings }
 }
 
 /** Appends to enabled_accessibility_services without dropping other services. */
 export async function enableService(name: 'InputKeyService' | 'HomeKeyService'): Promise<void> {
   const svc = `${PKG}/.${name}`
-  await T.sh(TASK, `s=$(settings get secure enabled_accessibility_services); case "$s" in *${name}*) ;; null|'') settings put secure enabled_accessibility_services ${svc} ;; *) settings put secure enabled_accessibility_services "$s:${svc}" ;; esac; settings put secure accessibility_enabled 1; echo ${name} enabled`)
+  // TCL firmware refuses to bind an app's accessibility service while the app is not running
+  // unless it holds the AUTO_START app-op, so grant it first; other TVs ignore the op. Builds
+  // name it AUTO_START or APP_AUTO_START, so set both, and flush app-ops to disk so the next
+  // reboot keeps the grant. A service already listed was refused while the APK was replaced, and
+  // binds again only once the list changes, so clear it, switch accessibility off and write it
+  // back (as the theme restart does).
+  await T.sh(TASK, `cmd appops set ${PKG} AUTO_START allow 2>/dev/null; cmd appops set ${PKG} APP_AUTO_START allow 2>/dev/null; appops write-settings 2>/dev/null; s=$(settings get secure enabled_accessibility_services); case "$s" in *${name}*) settings put secure enabled_accessibility_services ''; settings put secure accessibility_enabled 0; sleep 1; settings put secure enabled_accessibility_services "$s" ;; null|'') settings put secure enabled_accessibility_services ${svc} ;; *) settings put secure enabled_accessibility_services "$s:${svc}" ;; esac; settings put secure accessibility_enabled 1; echo ${name} enabled`)
 }
 
 export async function useStock(): Promise<ApplyResult> {

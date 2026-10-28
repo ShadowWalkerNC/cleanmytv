@@ -8,7 +8,10 @@ const methods = [
   'lists', 'plan', 'applyDebloat', 'restore',
   'launcherStatus', 'install', 'buildLocal', 'useStockLauncher',
   'apps', 'readTheme', 'applyTheme', 'resetTheme', 'presets', 'screenshot', 'webGet',
-  'systemState', 'setClockScreensaver', 'setPrivateDns', 'setAnimationScale', 'setLauncherLocale', 'key', 'reboot'
+  'systemState', 'setClockScreensaver', 'setPrivateDns', 'setAnimationScale', 'setLauncherLocale', 'key', 'reboot',
+  'listDevices', 'currentDevice', 'removeDevice', 'deviceCapabilities', 'capabilityReport',
+  'analyzeTv', 'fixTv',
+  'listSnapshots', 'createSnapshot', 'restoreSnapshot', 'deleteSnapshot', 'diffSnapshots'
 ] as const
 
 function listen<T>(channel: string, cb: (value: T) => void): () => void {

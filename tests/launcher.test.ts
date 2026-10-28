@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -16,7 +16,7 @@ process.env.HOME = home
 // the launcher having been built (CI builds it in a separate job).
 const resources = join(home, 'resources')
 mkdirSync(resources)
-symlinkSync(resolve('resources/upstream'), join(resources, 'upstream'))
+symlinkSync(resolve('resources/upstream'), join(resources, 'upstream'), 'junction')
 writeFileSync(join(resources, 'launcher.apk'), randomBytes(200 * 1024))
 writeFileSync(join(resources, 'launcher.json'), JSON.stringify({ versionName: '2.4' }))
 configurePaths(resources, join(home, 'data'))
@@ -47,9 +47,34 @@ describe('launcher and theme', () => {
     const order = tv.commands.filter((c) => /pm install|am start -W|pm disable-user|set-home-activity/.test(c))
     expect(order.map((c) => c.split(' ').slice(0, 2).join(' '))).toEqual(['pm install', 'am start', 'pm disable-user', 'cmd package'])
     expect(tv.commands.some((c) => c.includes('InputKeyService'))).toBe(true)
+    // The old instance is stopped before the start, so the start creates a fresh one (#1101); the
+    // start names HOME explicitly, and the key helper gets its TCL auto-start grant first.
+    const at = (s: string): number => tv.commands.findIndex((c) => c.includes(s))
+    expect(at('am force-stop com.gathin.tvhome')).toBeGreaterThan(at('pm install -r'))
+    expect(at('am force-stop com.gathin.tvhome')).toBeLessThan(at('am start -W'))
+    expect(tv.commands.some((c) => c.includes('am start -W -a android.intent.action.MAIN -c android.intent.category.HOME -n'))).toBe(true)
+    expect(tv.commands.some((c) => c.includes('AUTO_START') && c.includes('InputKeyService'))).toBe(true)
     const st = await L.status()
     expect(st.isHome).toBe(true)
     expect(st.versionName).toBe('2.4')
+  })
+
+  it('refuses a launcher too new for the TV before pushing anything', async () => {
+    writeFileSync(join(resources, 'launcher.json'), JSON.stringify({ versionName: '3.1', minSdk: 33 }))
+    const before = tv.commands.length
+    const r = await L.install({ apk: 'bundled', stockLauncher: 'auto', inputKeyService: false, homeKeyService: false })
+    expect(r.ok).toBe(false)
+    expect(r.summary).toMatch(/runs SDK 31 and the launcher needs SDK 33/)
+    expect(tv.commands.slice(before)).toEqual([])
+    writeFileSync(join(resources, 'launcher.json'), JSON.stringify({ versionName: '2.4' }))
+  })
+
+  it('names INSTALL_FAILED_OLDER_SDK instead of leaving a bare install failure', async () => {
+    tv.installFailure = 'Failure [INSTALL_FAILED_OLDER_SDK]'
+    const r = await L.install({ apk: 'bundled', stockLauncher: 'auto', inputKeyService: false, homeKeyService: false })
+    expect(r.ok).toBe(false)
+    expect(r.summary).toMatch(/too new for this set \(INSTALL_FAILED_OLDER_SDK\)/)
+    tv.installFailure = undefined
   })
 
   it('gives Home back to the stock launcher', async () => {
@@ -86,7 +111,17 @@ describe('launcher and theme', () => {
 
   it('says so plainly when the folder stays out of reach', async () => {
     tv.appDir = 'denied'
+    tv.themeProvider = false
     await expect(Th.apply({ config: { columns: 4 }, wallpaper: { kind: 'keep' }, wallpapers: { kind: 'keep' } })).rejects.toThrow(/won't let the app write/)
+    tv.appDir = 'ok'
+    tv.themeProvider = true
+  }, 15000)
+
+  it('writes through the ThemeProvider when the shell is locked out', async () => {
+    tv.appDir = 'denied'
+    const r = await Th.apply({ config: { columns: 6 }, wallpaper: { kind: 'keep' }, wallpapers: { kind: 'keep' } })
+    expect(r.ok).toBe(true)
+    expect(tv.commands.some((c) => c.includes('content write --uri'))).toBe(true)
     tv.appDir = 'ok'
   }, 15000)
 
@@ -98,5 +133,27 @@ describe('launcher and theme', () => {
     const ids = Th.presets().map((p) => p.id)
     expect(ids).toEqual(expect.arrayContaining(['aurora', 'default', 'six-columns']))
     expect(Th.presets().find((p) => p.id === 'aurora')?.wallpaper).toMatch(/^data:image\/jpeg;base64,/)
+  })
+
+  it('gives every preset a name and its rotation pictures', () => {
+    for (const p of Th.presets()) {
+      expect(p.name).toBeTruthy()
+      expect(p.description).toBeTruthy()
+      const dir = join(resources, 'upstream', 'themes', p.id, 'wallpapers')
+      const files = existsSync(dir) ? readdirSync(dir).filter((f) => /\.(jpe?g|png|webp)$/i.test(f)).sort() : []
+      expect(p.wallpapers.map((w) => w.name).sort()).toEqual(files)
+      for (const w of p.wallpapers) expect(w.base64.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('starts the component alone and grants the helper restore when asked', async () => {
+    const before = tv.commands.length
+    const r = await L.install({ apk: 'bundled', stockLauncher: 'none', inputKeyService: false, homeKeyService: false, restoreKeyServices: true })
+    expect(r.ok).toBe(true)
+    const fresh = tv.commands.slice(before)
+    expect(fresh.some((c) => c === 'am start -W -n com.gathin.tvhome/.MainActivity')).toBe(true)
+    expect(fresh.some((c) => c.includes('am start -W -a android.intent.action.MAIN'))).toBe(false)
+    expect(fresh.some((c) => c.includes('pm grant com.gathin.tvhome android.permission.WRITE_SECURE_SETTINGS'))).toBe(true)
+    expect(fresh.some((c) => c.includes('pm disable-user'))).toBe(false)
   })
 })

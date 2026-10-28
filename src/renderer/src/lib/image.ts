@@ -62,3 +62,10 @@ export function dataUrlToImage(dataUrl: string, name: string): PreparedImage {
   const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
   return { name: safeName(name), base64, dataUrl, bytes: bytesOf(dataUrl) }
 }
+
+/** A preset's rotation picture, already sized by the theme author, ready for the rotation set. */
+export function imageFileToPrepared(img: ImageFile): PreparedImage {
+  const ext = img.name.split('.').pop()?.toLowerCase()
+  const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg'
+  return { name: img.name, base64: img.base64, dataUrl: `data:${mime};base64,${img.base64}`, bytes: Math.floor((img.base64.length * 3) / 4) }
+}

@@ -98,6 +98,10 @@ export interface DebloatApplyRequest {
   enable: string[]
   forceHome?: boolean
   forceSetupwraith?: boolean
+  /** Disable packages that drive the HDMI/AV inputs anyway (upstream TVINPUT_ALLOW=1). */
+  forceTvInput?: boolean
+  /** Disable packages that open the TV's inputs and Settings anyway (upstream HANDLERS_ALLOW=1). */
+  forceHandlers?: boolean
 }
 
 export interface ApplyResult {
@@ -128,6 +132,8 @@ export interface InstallRequest {
   homeKeyService: boolean
   /** Uninstall a launcher signed with a different key before installing (loses on-TV order). */
   replaceIncompatible?: boolean
+  /** Grant WRITE_SECURE_SETTINGS so Home puts the key helpers back after a force stop (upstream RESTORE_KEY_SERVICES=1). */
+  restoreKeyServices?: boolean
 }
 
 export interface InstallResult extends ApplyResult {
@@ -180,6 +186,78 @@ export interface LauncherConfig {
   settings_key_panel?: boolean
   input_key_keycodes?: number[]
   app_keys?: string[]
+  // Keys added with the v3 launcher line (upstream themes/README.md). Every one is optional.
+  live_tv_input_id?: string
+  source_panel_extra?: string
+  coocaa_sources?: boolean
+  launch_actions?: string[]
+  app_labels?: string[]
+  app_banners?: string[]
+  input_uri_scheme?: string
+  input_sources?: string[]
+  show_network_pill?: boolean
+  top_bar_apps?: string[]
+  show_inputs_pill?: boolean
+  top_menu?: boolean
+  launcher_settings_button?: boolean
+  wifi_status_color?: boolean
+  wifi_status_warnings?: boolean
+  wifi_label_width?: number
+  library_button?: boolean
+  show_library_pill?: boolean
+  always_show_names?: boolean
+  uniform_tiles?: boolean
+  app_library_selection?: boolean
+  library_ok_opens?: boolean
+  library_apps?: string[]
+  lunar_date?: boolean
+  lunar_utc_offset?: number
+  date_below_clock?: boolean
+  locale?: string
+  show_greeting?: boolean
+  header_white?: boolean
+  boot_to_live_tv?: boolean
+  open_on_start_choice?: boolean
+  vpn_pill?: boolean
+  handle_view_inputs?: boolean
+  clock_wallpaper?: boolean
+  clock_wallpaper_dim?: number
+  clock_glow?: boolean
+  glow_style?: string
+  glass_style?: string
+  cinematic_home?: boolean
+  cinematic_dots?: boolean
+  cinematic_white_focus?: boolean
+  cinematic_scrim?: number
+  cinematic_art?: number
+  dock_even_padding?: boolean
+  dock_glass?: boolean
+  dock_band?: boolean
+  single_row?: boolean
+  dock_band_all?: boolean
+  ambient_glow?: boolean
+  app_glow?: boolean
+  fade_rows?: boolean
+  focus_overshoot?: boolean
+  wallpaper_order?: string
+  wallpaper_captions?: boolean
+  wallpaper_true_color?: boolean
+  wallpaper_moods?: Record<string, string[]>
+  dock_opacity?: number
+  icon_only_buttons?: boolean
+  icon_only_inputs?: boolean
+  tile_menu?: boolean
+  key_filter?: boolean
+  gamepad_passthrough?: boolean
+  consume_volume_keys?: boolean
+  stock_home_redirect?: string
+  power_on_home?: boolean
+  home_long_press_home?: boolean
+  power_on_home_always?: boolean
+  inputs_connected_only?: boolean
+  race_calendar?: Array<Record<string, unknown>>
+  home_idle_clock_minutes?: number
+  restore_key_services?: boolean
 }
 
 export interface TvTheme {
@@ -211,6 +289,8 @@ export interface ThemePreset {
   config: LauncherConfig
   /** Data URL of the preset's wallpaper.jpg, if it has one. */
   wallpaper: string | null
+  /** Rotation pictures from the preset's wallpapers/ folder, if it has one. */
+  wallpapers: ImageFile[]
 }
 
 export interface SystemState {
@@ -243,6 +323,90 @@ export interface WebResponse {
   status: number
   contentType: string
   base64: string
+}
+
+/** One TV (later: display) the app knows. Identity is the device itself, never its address. */
+export interface ManagedDevice {
+  /** Stable id: `adb-<android_id>`; `adb-<device-slug>` when the id is unreadable. */
+  id: string
+  provider: 'adb'
+  identity: {
+    androidId?: string
+    device?: string
+    model?: string
+    manufacturer?: string
+    build?: string
+  }
+  /** Capability ids probed as supported (see Capability). */
+  capabilities: string[]
+  state: 'connected' | 'known'
+  lastSeen: string
+  /** Last address it answered at: a reconnect hint only, never identity. */
+  lastAddress?: string
+}
+
+export interface Capability {
+  id: string
+  label: string
+  supported: boolean
+  detail?: string
+}
+
+/** Sanitized report: no addresses, keys, serials or file contents. */
+export interface CapabilityReport {
+  deviceId: string
+  takenAt: string
+  device: { model?: string; manufacturer?: string; android?: string; sdk: number; build?: string }
+  capabilities: Capability[]
+  /** Read-only OS facts for the report (bootloader, Treble, slots, root, DSU). */
+  os: Record<string, string>
+}
+
+export interface SnapshotSummary {
+  id: string
+  created: string
+  deviceId: string
+  label: string
+  /** What the snapshot covers (packages, home, theme, dns, ...). */
+  coverage: string[]
+  packages: number
+}
+
+export interface SnapshotDiff {
+  a: string
+  b: string
+  packagesChanged: Array<{ pkg: string; from: string; to: string }>
+  homeChanged: { from: string | null; to: string | null } | null
+  settingsChanged: Array<{ key: string; from: string; to: string }>
+  themeChanged: boolean
+}
+
+export interface TvAnalysis {
+  takenAt: string
+  deviceId: string
+  listId: string
+  listTitle: string
+  adsClutter: { level: 'High' | 'Medium' | 'Low'; enabledBloat: number; totalListed: number }
+  performance: { status: 'Good' | 'Needs optimization'; reasons: string[] }
+  privacy: { status: 'unscanned'; detail: string }
+  storage: { totalKb: number; availKb: number; low: boolean }
+  launcher: { home: string | null; isClean: boolean }
+  animations: string
+  recommendations: string[]
+}
+
+export interface FixReport {
+  ok: boolean
+  summary: string
+  warnings: string[]
+  snapshotId: string | null
+  metrics: {
+    packagesDisabled: number
+    animationsFrom: string
+    animationsTo: string
+    storageAvailBeforeKb: number
+    storageAvailAfterKb: number
+  }
 }
 
 export interface CytvApi {
@@ -300,6 +464,26 @@ export interface CytvApi {
   setLauncherLocale(tag: string): Promise<ApplyResult>
   key(keycode: number): Promise<void>
   reboot(): Promise<void>
+
+  // Devices & capabilities
+  listDevices(): Promise<ManagedDevice[]>
+  /** The registry entry for the connected TV, if it has been registered. */
+  currentDevice(): Promise<ManagedDevice | null>
+  removeDevice(id: string): Promise<void>
+  deviceCapabilities(): Promise<Capability[]>
+  /** Full probed report for the connected TV; safe to share (no addresses or keys). */
+  capabilityReport(): Promise<CapabilityReport>
+
+  // Analyze & Fix
+  analyzeTv(listId?: string): Promise<TvAnalysis>
+  fixTv(listId?: string): Promise<FixReport>
+
+  // Recovery Center (settings + app states, not a firmware backup)
+  listSnapshots(deviceId?: string): Promise<SnapshotSummary[]>
+  createSnapshot(label: string): Promise<SnapshotSummary>
+  restoreSnapshot(id: string): Promise<ApplyResult>
+  deleteSnapshot(id: string): Promise<void>
+  diffSnapshots(a: string, b: string): Promise<SnapshotDiff>
 
   // Events
   onLog(cb: (line: LogLine) => void): () => void

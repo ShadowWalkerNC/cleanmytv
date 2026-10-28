@@ -43,6 +43,27 @@ export interface FakeTv {
   screenshot: Buffer
   /** The launcher's Android/data folder: missing ones only appear once the launcher has run. */
   appDir: 'ok' | 'missing' | 'denied'
+  /** Whether `pm list packages` takes --user 0 (older firmware answers no package lines). */
+  pmUser0: boolean
+  /** Packages whose dump asks for TV_INPUT_HARDWARE, and ones whose dump cannot be read. */
+  tvInputDrivers: Set<string>
+  tvInputUnchecked: Set<string>
+  /** Components answering the input-switch and Settings intents. */
+  inputHandlers: string[]
+  settingsHandlers: string[]
+  /** Whether the launcher's ThemeProvider answers content write/delete/read. */
+  themeProvider: boolean
+  /** mHomeProcess answer override (null derives it from home, '' is the null line). */
+  mHome: string | null
+  /** `pm install` answers this failure instead of Success. */
+  installFailure?: string
+  /** Tools `command -v` does not find. */
+  toolsMissing: Set<string>
+  /** Per-app locales set by `cmd locale set-app-locales`. */
+  appLocales: Map<string, string>
+  /** /data size for `df`, in 1K blocks. */
+  storageTotalKb: number
+  storageAvailKb: number
   /** Misbehaviour for client hardening tests. */
   tokenSize?: number
   sendMalformed?: 'oversize' | 'magic'
@@ -52,7 +73,11 @@ export function newTv(): FakeTv {
   return {
     packages: new Map(), home: 'com.google.android.tvlauncher/.MainActivity', homeClaims: [], wifiOwners: 'cname=android.uid.system:1000',
     settings: new Map(), files: new Map(), commands: [], trusted: [], autoAccept: true, maxData: 4096, adbSecure: '1',
-    leanback: [], launcherApps: [], screenshot: Buffer.alloc(0), appDir: 'ok'
+    leanback: [], launcherApps: [], screenshot: Buffer.alloc(0), appDir: 'ok', pmUser0: true,
+    tvInputDrivers: new Set(), tvInputUnchecked: new Set(), inputHandlers: [],
+    settingsHandlers: ['com.android.tv.settings/.Settings'], themeProvider: true, mHome: null,
+    toolsMissing: new Set(), appLocales: new Map(),
+    storageTotalKb: 8000000, storageAvailKb: 3000000
   }
 }
 
@@ -65,11 +90,31 @@ function sh(tv: FakeTv, cmd: string): string {
   }
   if (cmd === 'pm list packages') return [...tv.packages.keys()].map((p) => `package:${p}`).join('\n') + '\n'
   if (cmd === 'pm list packages -d') return [...tv.packages].filter(([, s]) => s === 'disabled').map(([p]) => `package:${p}`).join('\n') + '\n'
+  if (cmd === 'pm list packages --user 0') return tv.pmUser0 ? [...tv.packages.keys()].map((p) => `package:${p}`).join('\n') + '\n' : 'Error: unknown option --user 0\n'
+  if (cmd === 'pm list packages -d --user 0') return tv.pmUser0 ? [...tv.packages].filter(([, s]) => s === 'disabled').map(([p]) => `package:${p}`).join('\n') + '\n' : 'Error: unknown option --user 0\n'
   if (cmd.startsWith('cmd package resolve-activity')) return `priority=0 preferredOrder=0\n${tv.home}\n`
   if (cmd.includes('LEANBACK_LAUNCHER')) return tv.leanback.map((p) => `  ${p}/.Main`).join('\n') + '\n'
   if (cmd.includes('category.LAUNCHER')) return tv.launcherApps.map((p) => `  ${p}/.Main`).join('\n') + '\n'
+  if (cmd.includes('vnd.android.cursor.item/channel')) {
+    const fmt = (cs: string[]): string => cs.filter((c) => tv.packages.get(c.split('/')[0]) !== 'disabled').map((c) => `  ${c}`).join('\n')
+    return `${fmt(tv.inputHandlers)}\n==\n${fmt(tv.settingsHandlers)}\n`
+  }
   if (cmd.startsWith('cmd package query-activities')) return tv.homeClaims.filter((c) => tv.packages.get(c.split('/')[0]) === 'enabled').map((c) => `  ${c}`).join('\n') + '\n'
   if (cmd === 'dumpsys wifi') return `WifiConfigManager ... ${tv.wifiOwners} ...\n`
+  if (cmd === 'dumpsys activity') {
+    const h = tv.mHome ?? tv.home
+    return h ? `  mHomeProcess: ProcessRecord{52f4a5c8 2f4b:${h.split('/')[0]}/u0a56}\n` : '  mHomeProcess: null\n'
+  }
+  if (cmd.startsWith('for p in ')) {
+    // The input-driver guard's round trip: names between "for p in " and "; do".
+    const names = cmd.slice('for p in '.length, cmd.indexOf('; do')).split(/\s+/).filter(Boolean)
+    const out: string[] = []
+    for (const p of names) {
+      if (tv.tvInputDrivers.has(p)) out.push(p)
+      else if (tv.tvInputUnchecked.has(p)) out.push(`NOCHK ${p}`)
+    }
+    return out.length ? out.join('\n') + '\n' : ''
+  }
   if ((m = /^settings get global (\S+)$/.exec(cmd))) return (tv.settings.get(m[1]) ?? 'null') + '\n'
   if ((m = /^pm disable-user --user 0 (\S+)$/.exec(cmd))) {
     if (!tv.packages.has(m[1])) return `Error: Unknown package: ${m[1]}\n`
@@ -80,9 +125,40 @@ function sh(tv: FakeTv, cmd: string): string {
     tv.packages.set(m[1], 'enabled'); return `Package ${m[1]} new state: enabled\n`
   }
   if ((m = /^settings put (?:global|secure) (\S+) (.*)$/.exec(cmd)) && !cmd.includes(';')) { tv.settings.set(m[1], m[2]); return '' }
+  if ((m = /^settings delete (?:global|secure) (\S+)$/.exec(cmd))) { tv.settings.delete(m[1]); return '' }
+  if (cmd.includes(';') && cmd.includes('settings ')) {
+    // Chained puts/deletes (screensaver, DNS, animations): apply the settings segments so a
+    // re-read sees them, then fall through to the other matchers below.
+    for (const seg of cmd.split(';')) {
+      const s = seg.trim()
+      let sm: RegExpExecArray | null
+      if ((sm = /^settings put (?:global|secure|system) (\S+) (.*)$/.exec(s))) tv.settings.set(sm[1], sm[2].replace(/ 2>\/dev\/null$/, ''))
+      else if ((sm = /^settings delete (?:global|secure|system) (\S+)$/.exec(s))) tv.settings.delete(sm[1])
+    }
+  }
   if ((m = /^settings get secure (\S+)$/.exec(cmd))) return (tv.settings.get(m[1]) ?? 'null') + '\n'
+  if ((m = /^pm uninstall (\S+)$/.exec(cmd))) {
+    if (!tv.packages.has(m[1])) return 'Failure [DELETE_FAILED_INTERNAL_ERROR]\n'
+    tv.packages.delete(m[1]); return 'Success\n'
+  }
+  if ((m = /^cmd locale get-app-locales (\S+)$/.exec(cmd))) return `[${tv.appLocales.get(m[1]) ?? ''}]\n`
+  if ((m = /^cmd locale set-app-locales (\S+) --locales (.*)$/.exec(cmd))) {
+    tv.appLocales.set(m[1], m[2].replace(/^"|"$/g, ''))
+    return ''
+  }
+  if ((m = /^command -v (\S+)$/.exec(cmd))) return tv.toolsMissing.has(m[1]) ? '\n' : `/system/bin/${m[1]}\n`
+  if (cmd === 'df /data') {
+    const used = tv.storageTotalKb - tv.storageAvailKb
+    const pct = tv.storageTotalKb ? Math.round((used / tv.storageTotalKb) * 100) : 0
+    return `Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/dm-2 ${tv.storageTotalKb} ${used} ${tv.storageAvailKb} ${pct}% /data\n`
+  }
+  if (cmd.startsWith('for t in ') && cmd.includes('command -v')) {
+    const names = cmd.slice('for t in '.length, cmd.indexOf('; do')).split(/\s+/).filter(Boolean)
+    return names.filter((n) => !tv.toolsMissing.has(n)).map((n) => `/system/bin/${n}`).join('\n') + '\n'
+  }
   if ((m = /^pm install -r (\S+)$/.exec(cmd))) {
     if (!tv.files.has(m[1])) return 'Failure [INSTALL_FAILED_INVALID_URI]\n'
+    if (tv.installFailure) return tv.installFailure + '\n'
     tv.packages.set('com.gathin.tvhome', 'enabled'); tv.homeClaims = [...new Set([...tv.homeClaims, 'com.gathin.tvhome/.MainActivity'])]
     return 'Performing Streamed Install\nSuccess\n'
   }
@@ -101,7 +177,37 @@ function sh(tv: FakeTv, cmd: string): string {
   if (cmd.startsWith('dumpsys package com.gathin.tvhome')) return tv.packages.has('com.gathin.tvhome') ? '    versionName=2.4\n' : ''
   if ((m = /^screencap -p (\S+)$/.exec(cmd))) { tv.files.set(m[1], tv.screenshot); return '' }
   if ((m = /^ls (\S+)\/wallpapers/.exec(cmd))) return [...tv.files.keys()].filter((f) => f.startsWith(m![1] + '/wallpapers/')).map((f) => f.split('/').pop()).join('\n') + '\n'
-  if ((m = /printf '%s' '(\w+)' > (\S+)/.exec(cmd))) tv.files.set(m[2], Buffer.from(m[1]))
+  if ((m = /printf '%s' '(\w+)' > (\S+)/.exec(cmd))) tv.files.set(m[2].replace(/;$/, ''), Buffer.from(m[1]))
+  if (cmd.includes('content write --uri ') || cmd.includes('content delete --uri ')) {
+    // The ThemeProvider path: a staged file lands as the launcher, even when the shell is locked
+    // out; without the provider the cp fallback needs a writable folder. One command can carry
+    // several operations (reset), so every one of them is emulated.
+    const cpTargets = [...cmd.matchAll(/cp (\S+) (\S+)/g)].map((c) => c[2])
+    let wi = 0
+    for (const w of cmd.matchAll(/content write --uri (\S+) < (\S+)/g)) {
+      const target = cpTargets[wi++] ?? ''
+      const staged = tv.files.get(w[2])
+      if (target && staged) {
+        if (tv.themeProvider || tv.appDir === 'ok') tv.files.set(target, staged)
+      }
+      tv.files.delete(w[2])
+    }
+    for (const d of cmd.matchAll(/content delete --uri (\S+)/g)) {
+      const name = d[1].split('.theme/')[1] ?? ''
+      if (name === 'wallpapers') {
+        for (const f of [...tv.files.keys()]) if (f.includes('/wallpapers/')) tv.files.delete(f)
+      } else if (name) {
+        for (const f of [...tv.files.keys()]) if (f.endsWith('/' + name)) tv.files.delete(f)
+      }
+    }
+    return ''
+  }
+  if ((m = /content read --uri (\S+)/.exec(cmd))) {
+    if (!tv.themeProvider) return ''
+    const name = m[1].split('.theme/')[1] ?? ''
+    for (const [f, data] of tv.files) if (f.endsWith('/' + name)) return data.toString('utf8')
+    return ''
+  }
   if (cmd.includes('rm -f') && cmd.includes('config.json')) for (const f of [...tv.files.keys()]) if (/config\.json|wallpaper/.test(f)) tv.files.delete(f)
   if (cmd.includes('echo reset')) return 'reset\n'
   if (cmd.includes('echo applied')) return 'applied\n'

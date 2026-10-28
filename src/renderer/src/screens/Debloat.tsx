@@ -18,6 +18,8 @@ export function Debloat({ status, go, markDone }: ScreenProps): ReactNode {
   const [result, setResult] = useState<ApplyResult | null>(null)
   const [forceHome, setForceHome] = useState(false)
   const [forceSetup, setForceSetup] = useState(false)
+  const [forceTvInput, setForceTvInput] = useState(false)
+  const [forceHandlers, setForceHandlers] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
 
   useEffect(() => {
@@ -96,7 +98,9 @@ export function Debloat({ status, go, markDone }: ScreenProps): ReactNode {
         disable: toDisable.map((e) => e.pkg),
         enable: toEnable.map((e) => e.pkg),
         forceHome,
-        forceSetupwraith: forceSetup
+        forceSetupwraith: forceSetup,
+        forceTvInput,
+        forceHandlers
       })
       setResult(r)
       if (r.ok) markDone('debloat')
@@ -318,6 +322,18 @@ export function Debloat({ status, go, markDone }: ScreenProps): ReactNode {
                   hint="Android deletes a network saved during setup when the wizard is switched off. Use this on Ethernet only."
                   checked={forceSetup}
                   onChange={setForceSetup}
+                />
+                <Toggle
+                  label="Switch off packages that drive the HDMI/AV inputs"
+                  hint="Without them the ports notice the cable but stay black, and only a full restore plus a cold boot brings the picture back."
+                  checked={forceTvInput}
+                  onChange={setForceTvInput}
+                />
+                <Toggle
+                  label="Switch off packages that open the inputs and Settings"
+                  hint="Without them the launcher's input tiles do nothing and Settings does not open."
+                  checked={forceHandlers}
+                  onChange={setForceHandlers}
                 />
               </div>
             )}

@@ -19,6 +19,8 @@ export const paths = {
   get bundledApkInfo(): string { return join(resourcesDir, 'launcher.json') },
   get keystore(): string { return join(resourcesDir, 'signing', 'cleanmytv.jks') },
   get adbKey(): string { return join(dataDir, 'adbkey') },
+  get devices(): string { return join(dataDir, 'devices.json') },
+  get recovery(): string { return join(dataDir, 'recovery') },
   get tools(): string { return join(dataDir, 'tools') },
   get localApk(): string { return join(dataDir, 'build', 'launcher.apk') },
   get settings(): string { return join(dataDir, 'settings.json') }

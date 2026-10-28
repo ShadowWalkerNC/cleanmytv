@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, publicDecrypt, constants, randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { androidPublicKey, loadKeys, sign } from '../src/main/adb/keys'
 import { configurePaths } from '../src/main/paths'
 import * as T from '../src/main/tv'
@@ -106,8 +106,174 @@ describe('talking to a TV', () => {
     const ours = D.restoreCommands(D.parseList(readFileSync(list, 'utf8')).entries.filter((e) => e.suggested).map((e) => e.pkg),
       D.loadRecord(D.recordPath(list, '127.0.0.1')), 'com.google.android.tvlauncher', notes)
     const theirs = execFileSync('python3', ['-I', join(UPSTREAM, 'tools', 'recovery.py'), '--commands', list, 'com.google.android.tvlauncher'],
-      { env: { ...process.env, HOME: home, TV_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim().split('\n')
+      { env: { ...process.env, HOME: home, TV_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'ignore'] }).toString().replace(/\r/g, '').trim().split('\n')
     expect(ours).toEqual(theirs)
+  })
+})
+
+describe('core packages', () => {
+  it('names what no list may disable, and allows the tested exceptions', () => {
+    expect(D.corePackages([
+      'android', 'com.android.systemui', 'com.android.shell', 'com.android.phone',
+      'com.android.settings', 'com.android.tv.settings',
+      'com.android.permissioncontroller', 'com.google.android.permissioncontroller',
+      'com.android.packageinstaller', 'com.android.ext.services', 'com.google.android.ext.shared',
+      'android.ext.services', 'android.ext.shared', 'com.android.modulemetadata',
+      'com.google.android.overlay.modules.foo', 'com.android.providers.media',
+      'com.cltv.mal', 'com.mediatek.tis', 'com.mediatek.tv.service', 'com.mediatek.tv.agent'
+    ])).toHaveLength(20)
+    expect(D.corePackages([
+      'com.android.providers.calendar', 'com.android.providers.contacts',
+      'com.android.providers.userdictionary', 'com.android.providers.blockednumber',
+      'com.vendor.ads', 'com.google.android.tvlauncher'
+    ])).toEqual([])
+  })
+})
+
+describe('v3 safety guards', () => {
+  let tv: FakeTv
+  let server: Server
+  let port: number
+  let listIds: string[]
+
+  beforeAll(() => {
+    listIds = D.lists(undefined).filter((l) => l.id !== 'custom').map((l) => l.id)
+  })
+  beforeEach(async () => {
+    tv = newTv()
+    ;({ server, port } = await startFakeAdbd(tv))
+    await T.connect(`127.0.0.1:${port}`)
+  })
+  afterEach(() => { T.disconnect(); server.close() })
+  // One list per test, so every apply writes a fresh record.
+  const listId = (i: number): string => listIds[i % listIds.length]
+
+  it('refuses a list naming core packages before touching the TV', async () => {
+    tv.packages.set('com.android.systemui', 'enabled')
+    const before = tv.commands.length
+    await expect(D.apply({ listId: listId(0), disable: ['com.android.systemui'], enable: [] })).rejects.toThrow(/core Android packages/)
+    expect(tv.commands.slice(before)).toEqual([])
+  })
+
+  it('keeps the stock launcher while setupwraith answers Home', async () => {
+    for (const p of ['com.google.android.apps.tv.launcherx', 'com.gathin.tvhome', D.SETUPWRAITH]) tv.packages.set(p, 'enabled')
+    tv.home = 'com.google.android.apps.tv.launcherx/.HomeActivity'
+    tv.homeClaims = ['com.google.android.apps.tv.launcherx/.HomeActivity', `${D.SETUPWRAITH}/.RecoveryActivity`, 'com.gathin.tvhome/.MainActivity']
+    const r = await D.apply({ listId: listId(1), disable: ['com.google.android.apps.tv.launcherx'], enable: [] })
+    expect(r.warnings.join('\n')).toMatch(/stays enabled and answers Home/)
+    expect(tv.packages.get('com.google.android.apps.tv.launcherx')).toBe('enabled')
+    const forced = await D.apply({ listId: listId(1), disable: ['com.google.android.apps.tv.launcherx'], enable: [], forceHome: true })
+    expect(forced.warnings.join('\n')).not.toMatch(/stays enabled and answers Home/)
+    expect(tv.packages.get('com.google.android.apps.tv.launcherx')).toBe('disabled')
+  })
+
+  it('skips TV input drivers and unreadable dumps unless forced', async () => {
+    for (const p of ['com.mediatek.tvinput', 'com.vendor.mystery', 'com.vendor.ads']) tv.packages.set(p, 'enabled')
+    tv.tvInputDrivers.add('com.mediatek.tvinput')
+    tv.tvInputUnchecked.add('com.vendor.mystery')
+    const r = await D.apply({ listId: listId(2), disable: ['com.mediatek.tvinput', 'com.vendor.mystery', 'com.vendor.ads'], enable: [] })
+    expect(r.warnings.join('\n')).toMatch(/TV_INPUT_HARDWARE/)
+    expect(r.warnings.join('\n')).toMatch(/cannot be read for the input-driver check/)
+    expect(tv.packages.get('com.mediatek.tvinput')).toBe('enabled')
+    expect(tv.packages.get('com.vendor.mystery')).toBe('enabled')
+    expect(tv.packages.get('com.vendor.ads')).toBe('disabled')
+    const forced = await D.apply({ listId: listId(2), disable: ['com.mediatek.tvinput', 'com.vendor.mystery'], enable: [], forceTvInput: true })
+    expect(forced.ok).toBe(true)
+    expect(tv.packages.get('com.mediatek.tvinput')).toBe('disabled')
+    expect(tv.packages.get('com.vendor.mystery')).toBe('disabled')
+  })
+
+  it('skips the apps that open inputs and Settings unless forced', async () => {
+    for (const p of ['com.vendor.livetv', 'com.vendor.settingsapp', 'com.vendor.ads']) tv.packages.set(p, 'enabled')
+    tv.inputHandlers = ['com.vendor.livetv/.Main']
+    tv.settingsHandlers = ['com.vendor.settingsapp/.Settings']
+    const r = await D.apply({ listId: listId(3), disable: ['com.vendor.livetv', 'com.vendor.settingsapp', 'com.vendor.ads'], enable: [] })
+    expect(r.warnings.join('\n')).toMatch(/opens its HDMI\/AV inputs/)
+    expect(r.warnings.join('\n')).toMatch(/opens Settings with it/)
+    expect(tv.packages.get('com.vendor.livetv')).toBe('enabled')
+    expect(tv.packages.get('com.vendor.settingsapp')).toBe('enabled')
+    expect(tv.packages.get('com.vendor.ads')).toBe('disabled')
+    await D.apply({ listId: listId(3), disable: ['com.vendor.livetv', 'com.vendor.settingsapp'], enable: [], forceHandlers: true })
+    expect(tv.packages.get('com.vendor.livetv')).toBe('disabled')
+    expect(tv.packages.get('com.vendor.settingsapp')).toBe('disabled')
+  })
+
+  it('fails closed when Home has no owner', async () => {
+    tv.packages.set('com.google.android.tvlauncher', 'enabled')
+    tv.home = ''
+    tv.homeClaims = ['com.google.android.tvlauncher/.MainActivity']
+    const r = await D.apply({ listId: listId(4), disable: ['com.google.android.tvlauncher'], enable: [] })
+    expect(r.warnings.join('\n')).toMatch(/no other app could answer Home/)
+    expect(tv.packages.get('com.google.android.tvlauncher')).toBe('enabled')
+  })
+
+  it('does not count a FallbackHome or a factory test as another Home', async () => {
+    for (const p of ['com.google.android.tvlauncher', 'com.tcl.keycustomfunctionservice', 'com.duokan.factorytest']) tv.packages.set(p, 'enabled')
+    tv.home = 'com.google.android.tvlauncher/.MainActivity'
+    tv.homeClaims = ['com.google.android.tvlauncher/.MainActivity', 'com.tcl.keycustomfunctionservice/.FallbackHome', 'com.duokan.factorytest/.FactoryLauncher']
+    const r = await D.apply({ listId: listId(5), disable: ['com.google.android.tvlauncher'], enable: [] })
+    expect(r.warnings.join('\n')).toMatch(/owns Home and nothing else/)
+    expect(tv.packages.get('com.google.android.tvlauncher')).toBe('enabled')
+  })
+
+  it('records installed stock launchers and restores only what was on', async () => {
+    for (const p of ['com.google.android.tvlauncher', 'com.vendor.ads']) tv.packages.set(p, 'enabled')
+    await D.apply({ listId: listId(6), disable: ['com.vendor.ads'], enable: [] })
+    const file = D.savedListPath(listId(6), T.getStatus().probe!)
+    const record = D.loadRecord(D.recordPath(file, '127.0.0.1'))
+    expect(record.packages['com.google.android.tvlauncher']).toBe('enabled')
+    const notes: string[] = []
+    const cmds = D.restoreCommands(['com.vendor.ads'],
+      { ...record, home: 'com.gathin.tvhome/.MainActivity', packages: { ...record.packages, 'com.google.android.tvlauncher': 'disabled', 'com.gathin.tvhome': 'enabled' } },
+      'com.google.android.tvlauncher', notes)
+    expect(cmds).not.toContain('pm enable com.google.android.tvlauncher')
+    expect(cmds).toContain('cmd package set-home-activity --user 0 com.gathin.tvhome/.MainActivity')
+    expect(notes.join('\n')).toMatch(/stays as it is/)
+  })
+
+  it('reads old records holding the chooser or a non-launcher Home', () => {
+    const f = join(home, 'old-record.json')
+    writeFileSync(f, JSON.stringify({ version: 1, created: 'x', host: 'h', list: 'l', home: 'android/com.android.internal.app.ResolverActivity', settings: {}, packages: { android: 'enabled', 'com.vendor.ads': 'enabled' } }))
+    const chooser = D.loadRecord(f)
+    expect(chooser.home).toBeNull()
+    expect(chooser.packages).not.toHaveProperty('android')
+    writeFileSync(f, JSON.stringify({ version: 1, created: 'x', host: 'h', list: 'l', home: `${D.SETUPWRAITH}/.RecoveryActivity`, settings: {}, packages: { [D.SETUPWRAITH]: 'enabled' } }))
+    const wiz = D.loadRecord(f)
+    expect(wiz.home).toBeNull()
+    expect(wiz.packages[D.SETUPWRAITH]).toBe('enabled')
+  })
+
+  it('refuses to choose between two records for one TV and list', () => {
+    const f = join(home, 'two-lists.txt')
+    writeFileSync(f, 'com.vendor.ads\n')
+    const rec = { version: 1, created: 'x', host: 'h', list: f, home: null, settings: {}, packages: {} }
+    const a = D.recordPath(f, '127.0.0.1')
+    const b = D.recordPath(f, '127.0.0.1:5555')
+    expect(a).not.toBe(b)
+    D.writeRecord(a, rec)
+    D.writeRecord(b, rec)
+    expect(() => D.findRecord(f, '127.0.0.1:5555', undefined)).toThrow(/two recovery records/)
+    rmSync(a)
+    rmSync(b)
+  })
+
+  it('warns when ro.adb.secure is empty', async () => {
+    tv.packages.set('com.vendor.ads', 'enabled')
+    tv.adbSecure = ''
+    T.disconnect()
+    expect((await T.connect(`127.0.0.1:${port}`)).state).toBe('connected')
+    const r = await D.apply({ listId: listId(7), disable: ['com.vendor.ads'], enable: [] })
+    expect(r.warnings.join('\n')).toMatch(/does not set ro\.adb\.secure/)
+  })
+
+  it('reads package state for user 0, falling back on old firmware', async () => {
+    tv.packages.set('com.vendor.ads', 'enabled')
+    await T.packageSets()
+    expect(tv.commands).toContain('pm list packages --user 0')
+    tv.commands.length = 0
+    tv.pmUser0 = false
+    await T.packageSets()
+    expect(tv.commands).toContain('pm list packages')
   })
 })
 
@@ -124,7 +290,8 @@ describe('upstream lists', () => {
   })
 
   it('offers a family-inferred list for unlisted models of a known brand', () => {
-    const all = D.lists({ host: '', model: 'MiTV-MSSP1', device: 'huangshan_mssp1', product: 'mssp1', manufacturer: 'Xiaomi', release: '9', sdk: 28, build: '', adbSecure: '1' })
+    // No list names this model, device or product, so only the brand family answers.
+    const all = D.lists({ host: '', model: 'Qzzz Q9', device: 'qzzz9', product: 'qzzz9', manufacturer: 'Xiaomi', release: '9', sdk: 28, build: '', adbSecure: '1' })
     const inferred = all.find((l) => l.title.startsWith('Inferred for your Xiaomi'))
     expect(inferred).toBeDefined()
     expect(inferred!.id).toBe('xiaomi-mitv-mssp3')

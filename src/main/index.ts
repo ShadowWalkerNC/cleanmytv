@@ -3,12 +3,16 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { configurePaths, paths } from './paths'
-import { setSinks } from './log'
+import { log, setSinks } from './log'
 import * as T from './tv'
 import * as debloat from './debloat'
 import * as launcher from './launcher'
 import * as theme from './theme'
 import * as system from './system'
+import * as devices from './devices'
+import * as capabilities from './capabilities'
+import * as recovery from './recovery'
+import * as analyze from './analyze'
 import * as tools from './toolchain'
 import { localSubnets, scan } from './scan'
 import { reconnect } from './reconnect'
@@ -90,12 +94,33 @@ const handlers: Omit<Handlers, 'onLog' | 'onProgress' | 'onStatus'> = {
   scan: () => scan(),
   connect: async (host) => {
     const s = await T.connect(host)
-    if (s.state === 'connected') writeSettings({ ...readSettings(), lastHost: host.trim(), lastDevice: s.probe?.device, lastModel: s.probe?.model })
+    if (s.state === 'connected') {
+      writeSettings({ ...readSettings(), lastHost: host.trim(), lastDevice: s.probe?.device, lastModel: s.probe?.model })
+      // Bookkeeping never fails a connect: capabilities stay empty when the TV won't answer.
+      try {
+        let caps: string[] = []
+        try {
+          caps = await capabilities.supportedIds()
+        } catch (e) {
+          log('devices', 'warn', `capability probe failed (${(e as Error).message}); registering without capabilities`)
+        }
+        await devices.registerCurrent(caps)
+      } catch (e) {
+        log('devices', 'warn', `registry update failed (${(e as Error).message})`)
+      }
+    }
     return s
   },
   // Only the saved address; T.connect, not handlers.connect, so a wrong device is never saved.
   reconnect: () => reconnect(readSettings(), { connect: T.connect, disconnect: T.disconnect, report: T.report }),
-  disconnect: async () => T.disconnect(),
+  disconnect: async () => {
+    T.disconnect()
+    try {
+      devices.markDisconnected()
+    } catch {
+      // registry bookkeeping, never user-visible
+    }
+  },
   status: async () => T.getStatus(),
   lastHost: async () => readSettings().lastHost ?? null,
   checkAdbClosed: (host) => system.adbClosed(host),
@@ -127,7 +152,19 @@ const handlers: Omit<Handlers, 'onLog' | 'onProgress' | 'onStatus'> = {
   setAnimationScale: (s) => system.animationScale(s),
   setLauncherLocale: (tag) => system.launcherLocale(tag),
   key: (code) => system.key(code),
-  reboot: () => system.reboot()
+  reboot: () => system.reboot(),
+  listDevices: async () => devices.listDevices(),
+  currentDevice: async () => devices.currentDevice(),
+  removeDevice: async (id) => devices.removeDevice(id),
+  deviceCapabilities: () => capabilities.probeCapabilities(),
+  capabilityReport: () => capabilities.capabilityReport(),
+  analyzeTv: (listId) => analyze.analyzeTv(listId),
+  fixTv: (listId) => analyze.fixTv(listId),
+  listSnapshots: async (deviceId) => recovery.listSnapshots(deviceId),
+  createSnapshot: (label) => recovery.createSnapshot(label),
+  restoreSnapshot: (id) => recovery.restoreSnapshot(id),
+  deleteSnapshot: async (id) => recovery.deleteSnapshot(id),
+  diffSnapshots: async (a, b) => recovery.diffSnapshots(a, b)
 }
 
 function send(channel: string, value: unknown): void {

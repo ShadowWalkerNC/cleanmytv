@@ -259,9 +259,12 @@ export async function buildApk(opts: { sourceDir: string; sdkDir: string; javaHo
   copyFileSync(apk, opts.outFile)
   const gradle = readFileSync(join(launcher, 'app', 'build.gradle'), 'utf8')
   const versionName = /versionName\s+'([^']+)'/.exec(gradle)?.[1] ?? 'unknown'
+  // The minimum SDK travels with the APK: the install asks the TV first, so a set too old for the
+  // launcher is refused before anything is pushed or disabled (upstream #576).
+  const minSdk = Number(/minSdk\s+(\d{1,3})/.exec(gradle)?.[1] ?? 0) || undefined
   // The upstream commit goes with the APK, so anyone can tell which reviewed source a build came from.
   const upstream = opts.sourceRev ?? (existsSync(join(opts.sourceDir, '.upstream-commit')) ? readFileSync(join(opts.sourceDir, '.upstream-commit'), 'utf8').trim() : 'unknown')
-  writeFileSync(opts.outFile.replace(/\.apk$/, '.json'), JSON.stringify({ versionName, upstream, built: new Date().toISOString() }, null, 2))
+  writeFileSync(opts.outFile.replace(/\.apk$/, '.json'), JSON.stringify({ versionName, ...(minSdk ? { minSdk } : {}), upstream, built: new Date().toISOString() }, null, 2))
   return versionName
 }
 

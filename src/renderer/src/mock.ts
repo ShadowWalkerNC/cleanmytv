@@ -105,10 +105,10 @@ export function installMock(): void {
   const ok = (summary: string, warnings: string[] = []): ApplyResult => ({ ok: true, summary, warnings })
 
   const presets: ThemePreset[] = [
-    { id: 'default', name: 'Default', description: 'The built-in look written out', config: { columns: 4, background_color: '#000000', wallpaper: false }, wallpaper: null },
-    { id: 'aurora', name: 'Aurora', description: 'Teal and violet wallpaper on navy', config: { background_color: '#070A14', wallpaper: true }, wallpaper: gradientUrl('#0b6e6e', '#3b1d6e', '#070a14') },
-    { id: 'dussehra', name: 'Dussehra', description: 'Festive skin, marigold and diya', config: { festival: 'dussehra', festival_until: '2026-10-21', accent_color: '#FFB23C', background_color: '#120809', wallpaper: true }, wallpaper: gradientUrl('#5a2a05', '#2a0c08', '#120809') },
-    { id: 'six-columns', name: 'Six columns', description: 'Six smaller tiles, one row under the dock', config: { columns: 6, rows_below_dock: 1, background_color: '#000000', wallpaper: false }, wallpaper: null }
+    { id: 'default', name: 'Default', description: 'The built-in look written out', config: { columns: 4, background_color: '#000000', wallpaper: false }, wallpaper: null, wallpapers: [] },
+    { id: 'aurora', name: 'Aurora', description: 'Teal and violet wallpaper on navy', config: { background_color: '#070A14', wallpaper: true }, wallpaper: gradientUrl('#0b6e6e', '#3b1d6e', '#070a14'), wallpapers: [] },
+    { id: 'dussehra', name: 'Dussehra', description: 'Festive skin, marigold and diya', config: { festival: 'dussehra', festival_until: '2026-10-21', accent_color: '#FFB23C', background_color: '#120809', wallpaper: true }, wallpaper: gradientUrl('#5a2a05', '#2a0c08', '#120809'), wallpapers: [] },
+    { id: 'six-columns', name: 'Six columns', description: 'Six smaller tiles, one row under the dock', config: { columns: 6, rows_below_dock: 1, background_color: '#000000', wallpaper: false }, wallpaper: null, wallpapers: [] }
   ]
 
   const sys: SystemState = {
@@ -348,6 +348,55 @@ export function installMock(): void {
     async reboot() {
       log('system', 'cmd', 'reboot')
       setStatus({ state: 'idle' })
+    },
+    async listDevices() {
+      return [
+        { id: 'adb-0011223344556677', provider: 'adb', identity: { androidId: '0011223344556677', device: 'BRAVIA_VH2', model: 'BRAVIA 4K VH2', manufacturer: 'Sony', build: 'TEST' }, capabilities: ['shell', 'apps.list'], state: 'connected', lastSeen: new Date().toISOString(), lastAddress: '127.0.0.1:5555' }
+      ]
+    },
+    async currentDevice() {
+      return (await this.listDevices())[0] ?? null
+    },
+    async removeDevice() {
+    },
+    async deviceCapabilities() {
+      return [
+        { id: 'shell', label: 'Shell commands', supported: true },
+        { id: 'apps.list', label: 'List installed apps', supported: true },
+        { id: 'system.privateDns', label: 'Private DNS', supported: true }
+      ]
+    },
+    async capabilityReport() {
+      return { deviceId: 'adb-0011223344556677', takenAt: new Date().toISOString(), device: { model: 'BRAVIA 4K VH2', manufacturer: 'Sony', android: '12', sdk: 31, build: 'TEST' }, capabilities: await this.deviceCapabilities(), os: { 'ro.build.version.security_patch': '2026-01-01' } }
+    },
+    async analyzeTv() {
+      return {
+        takenAt: new Date().toISOString(), deviceId: 'adb-0011223344556677', listId: 'sony-bravia-4k-vh2', listTitle: 'Sony BRAVIA 4K VH2',
+        adsClutter: { level: 'High', enabledBloat: 14, totalListed: 22 },
+        performance: { status: 'Needs optimization', reasons: ['System animations run at 1x instead of 0.5x.'] },
+        privacy: { status: 'unscanned', detail: 'The privacy audit is not built yet.' },
+        storage: { totalKb: 8000000, availKb: 900000, low: false },
+        launcher: { home: 'com.google.android.tvlauncher/.MainActivity', isClean: false },
+        animations: '1',
+        recommendations: ['Switch off 14 bloat apps (Fix does it behind a recovery point).']
+      }
+    },
+    async fixTv() {
+      return { ok: true, summary: 'Fixed with recovery point mock-snap: switched off 14 apps, animations 1x → 0.5x.', warnings: [], snapshotId: 'mock-snap', metrics: { packagesDisabled: 14, animationsFrom: '1', animationsTo: '0.5', storageAvailBeforeKb: 900000, storageAvailAfterKb: 900000 } }
+    },
+    async listSnapshots() {
+      return []
+    },
+    async createSnapshot(label: string) {
+      return { id: `mock-${Date.now()}`, created: new Date().toISOString(), deviceId: 'adb-0011223344556677', label, coverage: ['packages', 'home'], packages: 3 }
+    },
+    async restoreSnapshot() {
+      return ok('Restored mock snapshot.')
+    },
+    async deleteSnapshot() {
+    },
+    async diffSnapshots(a: string, b: string) {
+      return { a, b, packagesChanged: [], homeChanged: null, settingsChanged: [], themeChanged: false }
     },
     onLog(cb) {
       logs.add(cb)

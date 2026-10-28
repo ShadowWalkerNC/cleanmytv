@@ -9,6 +9,7 @@ export function Launcher({ go, markDone }: ScreenProps): ReactNode {
   const [stock, setStock] = useState<'auto' | 'none'>('auto')
   const [inputKey, setInputKey] = useState(false)
   const [homeKey, setHomeKey] = useState(false)
+  const [restoreHelpers, setRestoreHelpers] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [result, setResult] = useState<ApplyResult | null>(null)
   const [askReplace, setAskReplace] = useState(false)
@@ -32,7 +33,7 @@ export function Launcher({ go, markDone }: ScreenProps): ReactNode {
     setAskReplace(false)
     setBusy('Installing the launcher. Keep the TV on.')
     setResult(null)
-    const req: InstallRequest = { apk, stockLauncher: stock, inputKeyService: inputKey, homeKeyService: homeKey, replaceIncompatible }
+    const req: InstallRequest = { apk, stockLauncher: stock, inputKeyService: inputKey, homeKeyService: homeKey, replaceIncompatible, restoreKeyServices: restoreHelpers }
     try {
       const r = await window.cytv.install(req)
       setResult(r)
@@ -141,6 +142,14 @@ export function Launcher({ go, markDone }: ScreenProps): ReactNode {
               checked={homeKey}
               onChange={setHomeKey}
             />
+            {(inputKey || homeKey) && (
+              <Toggle
+                label="Put the key helpers back after a restart"
+                hint="Lets the launcher switch its own helpers back on after Android stops it. Needs restore_key_services in the theme to do anything."
+                checked={restoreHelpers}
+                onChange={setRestoreHelpers}
+              />
+            )}
             {(inputKey || homeKey) && (
               <p className="small muted" style={{ marginTop: 6 }}>
                 These are accessibility services. Android switches them off on every reinstall, so the app turns them on again each
