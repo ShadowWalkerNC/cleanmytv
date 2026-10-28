@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import type { LauncherConfig, TvApp } from '@shared/api'
 import { appColour, homeLayout, monogram, val } from '../lib/apps'
 
@@ -7,7 +7,7 @@ export function TvPreview(props: { apps: TvApp[]; cfg: LauncherConfig; wallpaper
   const { cfg, apps } = props
   const now = useNow()
   const [focus, setFocus] = useState(0)
-  const layout = homeLayout(apps, cfg)
+  const layout = useMemo(() => homeLayout(apps, cfg), [apps, cfg])
   const cols = Math.max(1, val(cfg, 'columns'))
   const rowsBelow = val(cfg, 'rows_below_dock')
   const dockRow = val(cfg, 'dock_row')

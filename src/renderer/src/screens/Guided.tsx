@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ApplyResult, DebloatPlan } from '@shared/api'
 import type { ScreenProps } from '../App'
-import { Busy, StatusChip, errorText } from '../components/ui'
+import { Busy, StatusChip, StepProgress, errorText, type StepState } from '../components/ui'
 
 type Phase =
   | { t: 'plan' }                       // picking the list, building the plan
@@ -17,8 +17,14 @@ type Phase =
 
 export default function Guided({ go, markDone }: ScreenProps): React.ReactElement {
   const [phase, setPhase] = useState<Phase>({ t: 'plan' })
+  const [progress, setProgress] = useState<StepState[] | null>(null)
   const alive = useRef(true)
+  const cancelled = useRef(false)
   useEffect(() => () => { alive.current = false }, [])
+
+  function mark(label: string, state: StepState['state'], detail?: string): void {
+    setProgress((prev) => prev?.map((s) => (s.label === label ? { ...s, state, detail: detail ?? s.detail } : s)) ?? null)
+  }
 
   useEffect(() => { if (phase.t === 'plan') void prepare() }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -45,10 +51,18 @@ export default function Guided({ go, markDone }: ScreenProps): React.ReactElemen
   async function run(skipDebloat: boolean): Promise<void> {
     const p = phase
     if (p.t !== 'ready') return
+    cancelled.current = false
+    const cleanLabel = `Clean up (${p.disable.length} packages)`
+    const launcherLabel = 'Install the launcher'
+    setProgress([
+      { label: cleanLabel, state: skipDebloat ? 'skipped' : 'todo', detail: skipDebloat ? 'Skipped by you' : undefined },
+      { label: launcherLabel, state: 'todo' }
+    ])
     setPhase({ t: 'run', step: 'Preparing' })
     const notes: string[] = []
     try {
       if (!skipDebloat) {
+        mark(cleanLabel, 'active')
         setPhase({ t: 'run', step: `Disabling ${p.disable.length} packages from "${p.plan.title}"` })
         const r = await window.cytv.applyDebloat({
           listId: p.plan.listId,
@@ -59,13 +73,20 @@ export default function Guided({ go, markDone }: ScreenProps): React.ReactElemen
         })
         if (!r.ok) throw new Error(r.summary)
         notes.push(`Cleaned up: ${p.disable.length} packages off (${r.warnings.length} warnings)`)
+        mark(cleanLabel, 'done')
         if (alive.current) markDone('debloat')
+        if (cancelled.current) {
+          mark(launcherLabel, 'skipped', 'Stopped before this step')
+          setPhase({ t: 'failed', message: `Stopped by you. ${notes.join(' · ')} — the launcher step did not run.` })
+          return
+        }
       } else {
         notes.push('Clean up skipped')
       }
 
       const before = await window.cytv.launcherStatus()
       if (!before.isHome) {
+        mark(launcherLabel, 'active')
         setPhase({ t: 'run', step: 'Installing the launcher' })
         const r = await window.cytv.install({
           apk: 'bundled',
@@ -76,9 +97,11 @@ export default function Guided({ go, markDone }: ScreenProps): React.ReactElemen
         })
         if (!r.ok) throw new Error(r.summary)
         notes.push('Launcher installed and set as Home')
+        mark(launcherLabel, 'done')
         if (alive.current) markDone('launcher')
       } else {
         notes.push('Launcher already Home — left as it was')
+        mark(launcherLabel, 'skipped', 'Already Home')
       }
 
       setPhase({ t: 'done', result: { ok: true, summary: notes.join(' · '), warnings: [] }, customised: true })
@@ -123,7 +146,17 @@ export default function Guided({ go, markDone }: ScreenProps): React.ReactElemen
         </div>
       )}
 
-      {phase.t === 'run' && <Busy text={phase.step} />}
+      {phase.t === 'run' && (
+        <div className="stack" style={{ gap: 16 }}>
+          {progress && <StepProgress steps={progress} />}
+          <Busy text={phase.step} />
+          <div className="row">
+            <button className="btn ghost" onClick={() => { cancelled.current = true }}>
+              Stop after this step
+            </button>
+          </div>
+        </div>
+      )}
 
       {phase.t === 'done' && (
         <div className="stack" style={{ gap: 16 }}>
@@ -131,6 +164,7 @@ export default function Guided({ go, markDone }: ScreenProps): React.ReactElemen
             <StatusChip status="ok" text="Done" />
             <p style={{ margin: '8px 0 0' }}>{phase.result.summary}</p>
           </div>
+          {progress && <StepProgress steps={progress} />}
           <div className="row">
             <button className="btn primary" onClick={() => go('customise')}>Customise my home screen</button>
             <button className="btn ghost" onClick={() => go('finish')}>Finish (close the debug port)</button>

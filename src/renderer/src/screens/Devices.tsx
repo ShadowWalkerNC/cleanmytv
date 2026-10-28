@@ -124,7 +124,7 @@ export function Devices({ status }: ScreenProps): ReactNode {
       )}
 
       {forget && (
-        <Confirm title={`Forget ${forget.identity.model ?? forget.id}?`} confirmLabel="Forget" onCancel={() => setForget(null)} onConfirm={() => {
+        <Confirm title={`Forget ${forget.identity.model ?? forget.id}?`} confirmLabel="Forget" danger onCancel={() => setForget(null)} onConfirm={() => {
           const id = forget.id
           setForget(null)
           run('Forgetting the TV', async () => {

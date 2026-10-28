@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { ApplyResult, DebloatEntry, DebloatListSummary, DebloatPlan, PackageState } from '@shared/api'
 import type { ScreenProps } from '../App'
-import { Busy, Confirm, ResultNotice, Toggle, errorText } from '../components/ui'
+import { Busy, Confirm, ResultNotice, Tabs, Toggle, errorText } from '../components/ui'
 
 type Filter = 'all' | 'disable' | 'disabled' | 'absent'
 
@@ -238,20 +238,21 @@ export function Debloat({ status, go, markDone }: ScreenProps): ReactNode {
           )}
 
           <div className="toolbar">
-            <div className="seg" role="tablist">
-              {(
+            <Tabs
+              tabs={
                 [
                   ['all', `All ${counts.all}`],
                   ['disable', `Will switch off ${counts.disable}`],
                   ['disabled', `Already off ${counts.disabled}`],
                   ['absent', `Not installed ${counts.absent}`]
                 ] as [Filter, string][]
-              ).map(([f, label]) => (
-                <button key={f} className={filter === f ? 'on' : ''} onClick={() => setFilter(f)}>
-                  {label}
-                </button>
-              ))}
-            </div>
+              }
+              value={filter}
+              onChange={setFilter}
+              className="seg"
+              label="Filter packages"
+              variant="radio"
+            />
             <span className="spacer" />
             <button className="btn small ghost" onClick={() => setTicked(new Set(plan.entries.filter(defaultTick).map((e) => e.pkg)))}>
               Back to the list's choices

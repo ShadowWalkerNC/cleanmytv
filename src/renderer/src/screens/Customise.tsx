@@ -3,7 +3,7 @@ import type { ApplyResult, LauncherConfig, ThemeApplyRequest, ThemePreset, TvApp
 import type { ScreenProps } from '../App'
 import { AppOrder } from '../components/AppOrder'
 import { TvPreview } from '../components/TvPreview'
-import { Busy, Confirm, Modal, ResultNotice, Slider, Toggle, errorText } from '../components/ui'
+import { Busy, Confirm, Modal, ResultNotice, Slider, Tabs, Toggle, errorText } from '../components/ui'
 import { BUILTIN, orderedApps, val } from '../lib/apps'
 import { dataUrlToImage, imageFileToPrepared, prepareWallpaper, uniqueNames, type PreparedImage } from '../lib/image'
 import { fetchBingDaily, tmdbBackdropPaths, fetchTmdbBackdrop } from '../lib/backgrounds'
@@ -145,13 +145,8 @@ export function Customise({ markDone }: ScreenProps): ReactNode {
 
         <div className="custom">
           <div>
-            <div className="tabs" role="tablist">
-              {TABS.map(([id, label]) => (
-                <button key={id} role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)}>
-                  {label}
-                </button>
-              ))}
-            </div>
+            <Tabs tabs={TABS} value={tab} onChange={setTab} className="tabs" label="Customise sections" panelId="customise" />
+            <div role="tabpanel" id="customise-panel" aria-labelledby={`customise-tab-${tab}`}>
             {tab === 'apps' && <AppsTab apps={apps} cfg={cfg} set={set} />}
             {tab === 'layout' && <LayoutTab cfg={cfg} set={set} />}
             {tab === 'backdrop' && (
@@ -171,6 +166,7 @@ export function Customise({ markDone }: ScreenProps): ReactNode {
             {tab === 'greeting' && <GreetingTab cfg={cfg} set={set} />}
             {tab === 'motion' && <MotionTab cfg={cfg} set={set} />}
             {tab === 'advanced' && <AdvancedTab apps={apps} cfg={cfg} set={set} />}
+            </div>
           </div>
           <div className="custom-preview">
             <TvPreview apps={apps} cfg={cfg} wallpaper={previewWall} />
@@ -209,13 +205,13 @@ export function Customise({ markDone }: ScreenProps): ReactNode {
       </div>
 
       {confirmReset && (
-        <Confirm title="Reset to the built-in look?" confirmLabel="Reset" onConfirm={reset} onCancel={() => setConfirmReset(false)}>
+        <Confirm title="Reset to the built-in look?" confirmLabel="Reset" danger onConfirm={reset} onCancel={() => setConfirmReset(false)}>
           <p>The theme file and wallpapers come off the TV, and Home restarts with the launcher's built-in dock and colours.</p>
           <p className="muted small">Apps added or removed through the App library on the TV stay as they are.</p>
         </Confirm>
       )}
       {shot && (
-        <Modal wide onClose={() => setShot(null)}>
+        <Modal wide label="The TV right now" onClose={() => setShot(null)}>
           <h2>The TV right now</h2>
           <img className="shot" src={shot} alt="Screenshot of the TV" />
           <p className="muted small" style={{ marginTop: 10 }}>

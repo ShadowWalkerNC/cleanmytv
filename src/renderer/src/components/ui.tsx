@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import type { ApplyResult, CheckStatus } from '@shared/api'
 
 export function Toggle(props: {
@@ -37,17 +37,60 @@ export function StatusChip({ status, text }: { status: CheckStatus; text?: strin
   return <span className={`chip ${status}`}>{text ?? chipText[status]}</span>
 }
 
-export function Modal(props: { children: ReactNode; onClose: () => void; wide?: boolean }): ReactNode {
+export function Modal(props: { children: ReactNode; onClose: () => void; wide?: boolean; label: string }): ReactNode {
+  const ref = useRef<HTMLDivElement>(null)
+  const close = props.onClose
   useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') props.onClose()
+    const node = ref.current
+    if (!node) return
+    const prev = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusables = (): HTMLElement[] =>
+      Array.from(
+        node.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+      ).filter((el) => !el.hasAttribute('disabled') && el.tabIndex >= 0)
+    // Respect an autoFocused child; otherwise land on the first control (or the dialog itself).
+    if (!node.contains(document.activeElement)) {
+      const first = focusables()
+      if (first.length) first[0].focus()
+      else node.focus()
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [props.onClose])
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        close()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const f = focusables()
+      if (!f.length) {
+        e.preventDefault()
+        return
+      }
+      const first = f[0]
+      const last = f[f.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    node.addEventListener('keydown', onKey)
+    return () => {
+      node.removeEventListener('keydown', onKey)
+      prev?.focus()
+    }
+  }, [close])
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div className={`modal${props.wide ? ' wide' : ''}`} role="dialog" aria-modal="true">
+      <div
+        ref={ref}
+        tabIndex={-1}
+        className={`modal${props.wide ? ' wide' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.label}
+      >
         {props.children}
       </div>
     </div>
@@ -60,16 +103,22 @@ export function Confirm(props: {
   confirmLabel: string
   onConfirm: () => void
   onCancel: () => void
+  /** Destructive action: focus lands on Cancel and the confirm button turns red. */
+  danger?: boolean
 }): ReactNode {
   return (
-    <Modal onClose={props.onCancel}>
+    <Modal onClose={props.onCancel} label={props.title}>
       <h2>{props.title}</h2>
       <div>{props.children}</div>
       <div className="modal-actions">
-        <button className="btn ghost" onClick={props.onCancel}>
+        <button className="btn ghost" onClick={props.onCancel} autoFocus={props.danger || undefined}>
           Cancel
         </button>
-        <button className="btn primary" onClick={props.onConfirm} autoFocus>
+        <button
+          className={`btn primary${props.danger ? ' danger' : ''}`}
+          onClick={props.onConfirm}
+          autoFocus={props.danger ? undefined : true}
+        >
           {props.confirmLabel}
         </button>
       </div>
@@ -110,6 +159,32 @@ export function Busy({ text }: { text: string }): ReactNode {
   )
 }
 
+export interface StepState {
+  label: string
+  state: 'todo' | 'active' | 'done' | 'skipped'
+  detail?: string
+}
+
+/** Honest multi-phase progress: every row reflects a step that really ran, runs, or was skipped. */
+export function StepProgress({ steps }: { steps: StepState[] }): ReactNode {
+  return (
+    <ol className="steps-progress" aria-label="Progress">
+      {steps.map((s) => (
+        <li key={s.label} className={`sp-${s.state}`} aria-current={s.state === 'active' ? 'step' : undefined}>
+          <span className="sp-dot" aria-hidden>
+            {s.state === 'done' ? '✓' : s.state === 'skipped' ? '–' : ''}
+          </span>
+          <span className="sp-label">
+            {s.label}
+            {s.detail && <span className="sp-detail">{s.detail}</span>}
+          </span>
+          {s.state === 'active' && <span className="spinner" />}
+        </li>
+      ))}
+    </ol>
+  )
+}
+
 export function Slider(props: {
   label: string
   hint?: string
@@ -139,6 +214,55 @@ export function Slider(props: {
         </output>
       </div>
     </label>
+  )
+}
+
+export function Tabs<T extends string>(props: {
+  tabs: readonly (readonly [T, string])[]
+  value: T
+  onChange: (v: T) => void
+  className: string
+  label: string
+  /** 'tab' switches panels; 'radio' picks one filter (single-select semantics). */
+  variant?: 'tab' | 'radio'
+  /** Id base wiring tabs to their panel (`${panelId}-tab-*` / `${panelId}-panel`). */
+  panelId?: string
+}): ReactNode {
+  const refs = useRef<(HTMLButtonElement | null)[]>([])
+  const variant = props.variant ?? 'tab'
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>, i: number): void => {
+    let next: number | null = null
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % props.tabs.length
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + props.tabs.length) % props.tabs.length
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = props.tabs.length - 1
+    if (next === null) return
+    e.preventDefault()
+    props.onChange(props.tabs[next][0])
+    refs.current[next]?.focus()
+  }
+  return (
+    <div className={props.className} role={variant === 'tab' ? 'tablist' : 'radiogroup'} aria-label={props.label}>
+      {props.tabs.map(([id, label], i) => (
+        <button
+          key={id}
+          ref={(el) => {
+            refs.current[i] = el
+          }}
+          role={variant === 'tab' ? 'tab' : 'radio'}
+          id={props.panelId ? `${props.panelId}-tab-${id}` : undefined}
+          aria-selected={variant === 'tab' ? props.value === id : undefined}
+          aria-checked={variant === 'radio' ? props.value === id : undefined}
+          aria-controls={variant === 'tab' && props.panelId ? `${props.panelId}-panel` : undefined}
+          tabIndex={props.value === id ? 0 : -1}
+          className={props.value === id ? 'on' : ''}
+          onClick={() => props.onChange(id)}
+          onKeyDown={(e) => onKeyDown(e, i)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
   )
 }
 

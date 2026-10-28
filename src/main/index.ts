@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, nativeTheme, session, shell } from 'electron'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -186,10 +186,11 @@ function createWindow(): void {
   win = new BrowserWindow({
     width: 1240,
     height: 820,
-    minWidth: 960,
+    minWidth: 840,
     minHeight: 640,
     title: 'CleanMyTV',
-    backgroundColor: '#FFFFFF',
+    // Match the renderer's --background token so a dark system never flashes white first.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#1c2a1f' : '#f8f5f0',
     show: false,
     webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: false }
   })

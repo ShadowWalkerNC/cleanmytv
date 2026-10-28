@@ -204,6 +204,7 @@ export function Extras({ markDone }: ScreenProps): ReactNode {
         <Confirm
           title="Restart the TV?"
           confirmLabel="Restart"
+          danger
           onCancel={() => setAskReboot(false)}
           onConfirm={() => {
             setAskReboot(false)

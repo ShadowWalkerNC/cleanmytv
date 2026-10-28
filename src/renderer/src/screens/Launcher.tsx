@@ -190,7 +190,7 @@ export function Launcher({ go, markDone }: ScreenProps): ReactNode {
       )}
 
       {askReplace && (
-        <Confirm title="Replace the launcher on the TV?" confirmLabel="Replace it" onConfirm={() => install(true)} onCancel={() => setAskReplace(false)}>
+        <Confirm title="Replace the launcher on the TV?" confirmLabel="Replace it" danger onConfirm={() => install(true)} onCancel={() => setAskReplace(false)}>
           <p>The launcher on the TV was built on another computer, so Android won't update it in place.</p>
           <p>
             The app can uninstall it and install this one. The tile order and App library choices you made on the TV are lost.

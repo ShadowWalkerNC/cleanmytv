@@ -1,13 +1,14 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import type { FixReport, TvAnalysis } from '@shared/api'
 import type { ScreenProps } from '../App'
+import { suggestNextStep } from '../lib/commands'
 import { Busy, ResultNotice, errorText } from '../components/ui'
 
 function gb(kb: number): string {
   return `${(kb / 1024 / 1024).toFixed(1)} GB`
 }
 
-export function Analyze({ }: ScreenProps): ReactNode {
+export function Analyze({ go }: ScreenProps): ReactNode {
   const [analysis, setAnalysis] = useState<TvAnalysis | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
   const [report, setReport] = useState<FixReport | null>(null)
@@ -47,6 +48,7 @@ export function Analyze({ }: ScreenProps): ReactNode {
   if (!analysis) return <Busy text="Analyzing your TV" />
 
   const good = analysis.adsClutter.level === 'Low' && analysis.performance.status === 'Good' && !analysis.storage.low
+  const suggestion = good ? null : suggestNextStep(analysis)
   const usedPct = analysis.storage.totalKb > 0 ? Math.round((1 - analysis.storage.availKb / analysis.storage.totalKb) * 100) : 0
 
   return (
@@ -56,6 +58,21 @@ export function Analyze({ }: ScreenProps): ReactNode {
         Checked against {analysis.listTitle}. {analysis.adsClutter.enabledBloat} of {analysis.adsClutter.totalListed} listed apps
         still on.
       </p>
+      {suggestion && (
+        <div className="card white">
+          <div className="card-head">
+            <div>
+              <h2 style={{ marginBottom: 4 }}>Suggested next step</h2>
+              <p className="muted" style={{ margin: 0 }}>
+                {suggestion.reason}
+              </p>
+            </div>
+            <button className="btn primary" onClick={() => go(suggestion.step)}>
+              {suggestion.title}
+            </button>
+          </div>
+        </div>
+      )}
       {busy && (
         <div className="notice">
           <Busy text={busy} />

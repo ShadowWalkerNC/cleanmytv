@@ -186,7 +186,7 @@ export function Recovery({ }: ScreenProps): ReactNode {
       )}
 
       {remove && (
-        <Confirm title={`Delete ${remove.label}?`} confirmLabel="Delete" onCancel={() => setRemove(null)} onConfirm={() => {
+        <Confirm title={`Delete ${remove.label}?`} confirmLabel="Delete" danger onCancel={() => setRemove(null)} onConfirm={() => {
           const id = remove.id
           setRemove(null)
           run('Deleting the snapshot', async () => {
