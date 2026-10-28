@@ -369,6 +369,9 @@ export function installMock(): void {
     async capabilityReport() {
       return { deviceId: 'adb-0011223344556677', takenAt: new Date().toISOString(), device: { model: 'BRAVIA 4K VH2', manufacturer: 'Sony', android: '12', sdk: 31, build: 'TEST' }, capabilities: await this.deviceCapabilities(), os: { 'ro.build.version.security_patch': '2026-01-01' } }
     },
+    async cecState() {
+      return { available: false, enabled: false, detail: 'The mock TV has no CEC link.' }
+    },
     async analyzeTv() {
       return {
         takenAt: new Date().toISOString(), deviceId: 'adb-0011223344556677', listId: 'sony-bravia-4k-vh2', listTitle: 'Sony BRAVIA 4K VH2',

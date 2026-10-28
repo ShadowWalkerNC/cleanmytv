@@ -9,7 +9,7 @@ const methods = [
   'launcherStatus', 'install', 'buildLocal', 'useStockLauncher',
   'apps', 'readTheme', 'applyTheme', 'resetTheme', 'presets', 'screenshot', 'webGet',
   'systemState', 'setClockScreensaver', 'setPrivateDns', 'setAnimationScale', 'setLauncherLocale', 'key', 'reboot',
-  'listDevices', 'currentDevice', 'removeDevice', 'deviceCapabilities', 'capabilityReport',
+  'listDevices', 'currentDevice', 'removeDevice', 'deviceCapabilities', 'capabilityReport', 'cecState',
   'analyzeTv', 'fixTv',
   'listSnapshots', 'createSnapshot', 'restoreSnapshot', 'deleteSnapshot', 'diffSnapshots'
 ] as const

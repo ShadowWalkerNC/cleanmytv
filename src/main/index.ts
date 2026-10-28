@@ -11,6 +11,7 @@ import * as theme from './theme'
 import * as system from './system'
 import * as devices from './devices'
 import * as capabilities from './capabilities'
+import * as cec from './cec'
 import * as recovery from './recovery'
 import * as analyze from './analyze'
 import * as tools from './toolchain'
@@ -158,6 +159,7 @@ const handlers: Omit<Handlers, 'onLog' | 'onProgress' | 'onStatus'> = {
   removeDevice: async (id) => devices.removeDevice(id),
   deviceCapabilities: () => capabilities.probeCapabilities(),
   capabilityReport: () => capabilities.capabilityReport(),
+  cecState: () => cec.cecState(),
   analyzeTv: (listId) => analyze.analyzeTv(listId),
   fixTv: (listId) => analyze.fixTv(listId),
   listSnapshots: async (deviceId) => recovery.listSnapshots(deviceId),

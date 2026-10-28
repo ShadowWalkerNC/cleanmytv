@@ -5,7 +5,8 @@ import { readFileSync } from 'node:fs'
 import { paths } from './paths'
 import * as T from './tv'
 import { currentDevice } from './devices'
-import type { Capability, CapabilityReport } from '@shared/api'
+import { cecState } from './cec'
+import type { Capability, CapabilityReport, CecState } from '@shared/api'
 
 export const CAPS = {
   shell: 'shell',
@@ -26,7 +27,8 @@ export const CAPS = {
   systemLocale: 'system.locale',
   remoteKeys: 'remote.keys',
   screenshot: 'screenshot',
-  powerReboot: 'power.reboot'
+  powerReboot: 'power.reboot',
+  displayCec: 'display.cec'
 } as const
 
 interface Toolset {
@@ -70,6 +72,10 @@ export async function probeCapabilities(): Promise<Capability[]> {
   const sdk = probe.sdk
   const tools = await toolset()
   const minSdk = launcherMinSdk()
+  // A TV without the CEC service must not fail the whole probe.
+  const cec: CecState = await cecState().catch(
+    (): CecState => ({ available: false, enabled: false, detail: 'Could not read the CEC state.' })
+  )
   const caps: Capability[] = [
     { id: CAPS.shell, label: 'Shell commands', supported: true },
     { id: CAPS.settingsRead, label: 'Read system settings', supported: true },
@@ -103,7 +109,13 @@ export async function probeCapabilities(): Promise<Capability[]> {
     },
     { id: CAPS.remoteKeys, label: 'Remote keys', supported: tools.hasInput, detail: tools.hasInput ? undefined : 'No input tool on this TV.' },
     { id: CAPS.screenshot, label: 'Screenshots', supported: tools.hasScreencap, detail: tools.hasScreencap ? undefined : 'No screencap on this TV.' },
-    { id: CAPS.powerReboot, label: 'Restart', supported: true }
+    { id: CAPS.powerReboot, label: 'Restart', supported: true },
+    {
+      id: CAPS.displayCec,
+      label: 'HDMI-CEC link',
+      supported: cec.available && cec.enabled,
+      detail: cec.available && cec.enabled ? undefined : cec.detail
+    }
   ]
   return caps
 }

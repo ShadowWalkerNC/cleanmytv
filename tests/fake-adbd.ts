@@ -64,6 +64,8 @@ export interface FakeTv {
   /** /data size for `df`, in 1K blocks. */
   storageTotalKb: number
   storageAvailKb: number
+  /** Answer to `dumpsys hdmi_control`. */
+  cecDumpsys: string
   /** Misbehaviour for client hardening tests. */
   tokenSize?: number
   sendMalformed?: 'oversize' | 'magic'
@@ -77,7 +79,8 @@ export function newTv(): FakeTv {
     tvInputDrivers: new Set(), tvInputUnchecked: new Set(), inputHandlers: [],
     settingsHandlers: ['com.android.tv.settings/.Settings'], themeProvider: true, mHome: null,
     toolsMissing: new Set(), appLocales: new Map(),
-    storageTotalKb: 8000000, storageAvailKb: 3000000
+    storageTotalKb: 8000000, storageAvailKb: 3000000,
+    cecDumpsys: '  mHwCecAvailable: true\n  mIsCecAvailable: true\n  hdmi_cec_enabled (int): 1\n'
   }
 }
 
@@ -101,6 +104,7 @@ function sh(tv: FakeTv, cmd: string): string {
   }
   if (cmd.startsWith('cmd package query-activities')) return tv.homeClaims.filter((c) => tv.packages.get(c.split('/')[0]) === 'enabled').map((c) => `  ${c}`).join('\n') + '\n'
   if (cmd === 'dumpsys wifi') return `WifiConfigManager ... ${tv.wifiOwners} ...\n`
+  if (cmd === 'dumpsys hdmi_control') return tv.cecDumpsys
   if (cmd === 'dumpsys activity') {
     const h = tv.mHome ?? tv.home
     return h ? `  mHomeProcess: ProcessRecord{52f4a5c8 2f4b:${h.split('/')[0]}/u0a56}\n` : '  mHomeProcess: null\n'

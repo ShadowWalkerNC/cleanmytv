@@ -362,6 +362,15 @@ export interface CapabilityReport {
   os: Record<string, string>
 }
 
+export interface CecState {
+  /** A CEC service answered on this TV. */
+  available: boolean
+  /** CEC is switched on. */
+  enabled: boolean
+  /** Plain-language state for the UI. */
+  detail: string
+}
+
 export interface SnapshotSummary {
   id: string
   created: string
@@ -473,6 +482,9 @@ export interface CytvApi {
   deviceCapabilities(): Promise<Capability[]>
   /** Full probed report for the connected TV; safe to share (no addresses or keys). */
   capabilityReport(): Promise<CapabilityReport>
+
+  // Display (HDMI-CEC link, read through the connected box)
+  cecState(): Promise<CecState>
 
   // Analyze & Fix
   analyzeTv(listId?: string): Promise<TvAnalysis>
