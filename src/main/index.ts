@@ -12,6 +12,7 @@ import * as system from './system'
 import * as devices from './devices'
 import * as capabilities from './capabilities'
 import * as cec from './cec'
+import * as vizio from './vizio'
 import * as recovery from './recovery'
 import * as analyze from './analyze'
 import * as tools from './toolchain'
@@ -160,6 +161,12 @@ const handlers: Omit<Handlers, 'onLog' | 'onProgress' | 'onStatus'> = {
   deviceCapabilities: () => capabilities.probeCapabilities(),
   capabilityReport: () => capabilities.capabilityReport(),
   cecState: () => cec.cecState(),
+  vizioPairStart: (host) => vizio.pairStart(host),
+  vizioPairFinish: (host, token, pin) => vizio.pairFinish(host, token, pin),
+  vizioKey: (name) => vizio.key(name),
+  vizioPower: () => vizio.power(),
+  vizioInput: () => vizio.currentInput(),
+  vizioSetInput: (name) => vizio.setInput(name),
   analyzeTv: (listId) => analyze.analyzeTv(listId),
   fixTv: (listId) => analyze.fixTv(listId),
   listSnapshots: async (deviceId) => recovery.listSnapshots(deviceId),

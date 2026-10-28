@@ -372,6 +372,24 @@ export function installMock(): void {
     async cecState() {
       return { available: false, enabled: false, detail: 'The mock TV has no CEC link.' }
     },
+    async vizioPairStart(host: string) {
+      return { host, token: 4242 }
+    },
+    async vizioPairFinish() {
+      return { ok: true, summary: 'Paired with the VIZIO (mock).', warnings: [] }
+    },
+    async vizioKey() {
+      return { ok: true, summary: 'Sent (mock).', warnings: [] }
+    },
+    async vizioPower() {
+      return { power: 'On' }
+    },
+    async vizioInput() {
+      return { input: 'HDMI-1' }
+    },
+    async vizioSetInput() {
+      return { ok: true, summary: 'Input set (mock).', warnings: [] }
+    },
     async analyzeTv() {
       return {
         takenAt: new Date().toISOString(), deviceId: 'adb-0011223344556677', listId: 'sony-bravia-4k-vh2', listTitle: 'Sony BRAVIA 4K VH2',

@@ -10,6 +10,7 @@ const methods = [
   'apps', 'readTheme', 'applyTheme', 'resetTheme', 'presets', 'screenshot', 'webGet',
   'systemState', 'setClockScreensaver', 'setPrivateDns', 'setAnimationScale', 'setLauncherLocale', 'key', 'reboot',
   'listDevices', 'currentDevice', 'removeDevice', 'deviceCapabilities', 'capabilityReport', 'cecState',
+  'vizioPairStart', 'vizioPairFinish', 'vizioKey', 'vizioPower', 'vizioInput', 'vizioSetInput',
   'analyzeTv', 'fixTv',
   'listSnapshots', 'createSnapshot', 'restoreSnapshot', 'deleteSnapshot', 'diffSnapshots'
 ] as const

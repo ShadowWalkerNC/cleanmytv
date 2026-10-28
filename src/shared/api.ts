@@ -373,6 +373,8 @@ export interface CecState {
   detail: string
 }
 
+export type VizioKey = 'vol-up' | 'vol-down' | 'mute' | 'input-next'
+
 export interface SnapshotSummary {
   id: string
   created: string
@@ -487,6 +489,14 @@ export interface CytvApi {
 
   // Display (HDMI-CEC link, read through the connected box)
   cecState(): Promise<CecState>
+
+  // VIZIO SmartCast over the LAN (PIN pairing, token kept next to the ADB key)
+  vizioPairStart(host: string): Promise<{ host: string; token: number }>
+  vizioPairFinish(host: string, token: number, pin: string): Promise<ApplyResult>
+  vizioKey(name: VizioKey): Promise<ApplyResult>
+  vizioPower(): Promise<{ power: string }>
+  vizioInput(): Promise<{ input: string }>
+  vizioSetInput(name: string): Promise<ApplyResult>
 
   // Analyze & Fix
   analyzeTv(listId?: string): Promise<TvAnalysis>
