@@ -36,6 +36,8 @@ export interface ConnStatus {
 
 export interface ScanHit {
   host: string
+  /** Friendly name when this address matches a registered TV. The scan never handshakes to learn it. */
+  name?: string
 }
 
 export type CheckStatus = 'ok' | 'missing' | 'warn' | 'optional' | 'checking'

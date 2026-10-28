@@ -213,7 +213,10 @@ export function Setup({ status, go }: ScreenProps): ReactNode {
                       onDoubleClick={() => connect(h.host)}
                     >
                       <span className="dot ok" />
-                      <span style={{ flex: 1 }}>{h.host}</span>
+                      <span style={{ flex: 1 }}>
+                        {h.name ?? h.host}
+                        {h.name && <span className="muted small" style={{ marginLeft: 8 }}>{h.host}</span>}
+                      </span>
                       <span className="muted small">port 5555 open</span>
                     </button>
                   </li>

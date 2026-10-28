@@ -137,7 +137,7 @@ export function installMock(): void {
     platform: 'darwin',
     async scan() {
       await wait(1200)
-      return [{ host: '192.168.1.50' }, { host: '192.168.1.73' }]
+      return [{ host: '192.168.1.50', name: 'onn. 4K Streaming Box' }, { host: '192.168.1.73' }]
     },
     async connect(host) {
       setStatus({ state: 'connecting', host })
